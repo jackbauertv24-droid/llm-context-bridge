@@ -1,9 +1,9 @@
 /**
  * The function that runs inside the page.
  *
- * It lives in its own module so it can be exercised against a DOM stub in
- * test/extract.test.mjs — the extraction rules are the part that has cost
- * real debugging rounds, and they should not need a browser to check.
+ * It lives in its own module so lib-replay.mjs can run it against a saved
+ * capture with no browser — the extraction rules are the part that has cost
+ * real debugging rounds, and re-checking them should not need another one.
  *
  * It is serialized with Function.prototype.toString and evaluated in the tab,
  * so it must stay entirely self-contained: no imports, no outer references.
@@ -234,8 +234,8 @@ export async function askInPage(cfg) {
 
   // A structured dump of the conversation region, rich enough that
   // lib-replay.mjs can rebuild it offline and re-run this very function
-  // against it. A wrong answer is therefore diagnosed, fixed and regression
-  // tested from this file alone, with no further manual run.
+  // against it, so a wrong answer is diagnosed and the fix checked from this
+  // file alone, with no further manual run.
   const LIMITS = { depth: 9, kids: 40, text: 4000 };
   const snapshot = (el, depth = 0) => {
     const all = [...el.children];

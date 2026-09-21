@@ -8,8 +8,8 @@
  * function against it — offline, with no browser and no Copilot.
  *
  * The point is that a wrong answer costs one run, not a series of them: the
- * capture from that run becomes both the diagnosis and, dropped into
- * test/fixtures/, a permanent regression test.
+ * capture from that run is the whole diagnosis, and the fix can be verified
+ * against it here rather than by going back to the page.
  */
 import { El, document as doc, installGlobals, resetDom } from './lib-dom.mjs';
 import { askInPage } from './page-fn.mjs';
@@ -175,7 +175,7 @@ export async function replay(capture, opts = {}) {
   } finally { restore(); }
 }
 
-/** A short human report of a replay, for --replay and for test failures. */
+/** A short human report of a replay, for --replay and /replay. */
 export function report(res) {
   const lines = [];
   const r = res.replay;

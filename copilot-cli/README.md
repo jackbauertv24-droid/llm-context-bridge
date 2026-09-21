@@ -95,8 +95,6 @@ credentials in an attached file are flagged before it is sent. Limits are
 The answer goes to stdout and every diagnostic to stderr, so
 `node chat.mjs "..." > answer.md` captures the answer alone.
 
-Tested by `node --test test/files.test.mjs` — 23 cases, no browser needed.
-
 ## When the DOM is not what the defaults expect
 
 `chat.mjs` auto-detects the input, send button and answer region with
@@ -166,27 +164,6 @@ selector tweak, not a rewrite.
 | `lib-files.mjs` | `@path` expansion into attachment blocks |
 | `lib-dom.mjs` | A hand-written DOM, so the page function runs with no browser |
 | `lib-replay.mjs` | Rebuilds a saved capture and re-runs extraction against it |
-| `test/copilot-page.mjs` | The replica of Copilot's page, shared by the tests |
-| `test/fixtures/` | Captured turns that must keep extracting correctly |
-
-## Tests
-
-```sh
-node --test test/*.test.mjs
-```
-
-40 cases, no browser and no network. `extract.test.mjs` runs the real page
-function against a replica of Copilot's DOM — the structure taken from a live
-probe, not invented — and every case in it is a failure that actually happened:
-the suggestion chips printed as an answer, the first characters of a reply
-going missing, the prompt echoed back as its own answer, a reply streamed into
-an element that already existed, and a send that never registered being
-reported as a send fault rather than a selector one.
-
-`replay.test.mjs` closes the loop: it captures a turn, rebuilds the page from
-that capture alone, re-runs the same page function, and requires the same
-answer. Every file in `test/fixtures/` is replayed too, so a capture from a
-turn that went wrong becomes a permanent test by being dropped in there.
 
 ## When an answer still comes out wrong
 
@@ -207,17 +184,7 @@ or `/replay` inside the REPL. It prints every candidate with its score and
 flags, which of them won, and the answer that would have been printed — so a
 bad pick is diagnosed, fixed and verified without going back to the page.
 
-To make the fix stick, copy the capture into `test/fixtures/`, add an
-`expect` block naming what the answer should have been:
-
-```json
-{ "expect": { "startsWith": "The first words of the real reply",
-              "excludes": ["Can you tell me a fun fact?"] },
-  "tree": { ... } }
-```
-
-and `node --test test/*.test.mjs` replays it forever after. One live turn is
-all any bug here should ever cost.
+One live turn is all any bug here should ever cost.
 
 The capture holds the text of the conversation region, so treat it as you
 would the conversation: keep it local, or redact before sharing it.
