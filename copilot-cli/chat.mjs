@@ -21,6 +21,10 @@
  */
 import readline from 'node:readline';
 import fs from 'node:fs';
+
+// Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
+// a previous build is otherwise indistinguishable from a fresh one.
+const VERSION = '2026-09-21.3';
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 
@@ -326,7 +330,7 @@ async function runTurn(cdp, raw, stdinText) {
   }
   lastDebug = res.debug;
   try {
-    fs.writeFileSync('copilot-cli-lastturn.txt', JSON.stringify({ method: res.method, chars: (res.text || '').length, debug: res.debug }, null, 2) + '\n');
+    fs.writeFileSync('copilot-cli-lastturn.txt', JSON.stringify({ version: VERSION, when: new Date().toISOString(), method: res.method, chars: (res.text || '').length, debug: res.debug }, null, 2) + '\n');
   } catch { /* diagnostics are a nicety, never a reason to fail a turn */ }
   if (res.method && res.method.startsWith('body-innerText')) {
     note('[bridge] fell back to whole-page text; paste copilot-cli-lastturn.txt to get the answer selector pinned.');
@@ -347,7 +351,7 @@ async function attach() {
     note('\nLaunch Chrome with remote debugging first (README > "Launch Chrome"), open the chat, and retry.');
     process.exit(1);
   }
-  note(`Attached to: ${target.url}`);
+  note(`copilot-cli ${VERSION} — attached to: ${target.url}`);
   const cdp = new CDP(target.webSocketDebuggerUrl);
   await cdp.connect();
   await cdp.send('Runtime.enable');
@@ -356,6 +360,7 @@ async function attach() {
 
 async function main() {
   const args = process.argv.slice(2);
+  if (args.includes('--version') || args.includes('-v')) { out(VERSION); return; }
   if (args.includes('--help') || args.includes('-h')) { out(HELP); return; }
 
   const argvPrompt = args.filter((a) => !a.startsWith('-')).join(' ').trim();
