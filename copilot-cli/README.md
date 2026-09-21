@@ -1,0 +1,124 @@
+# copilot-cli
+
+Talk to a chat web UI you are already signed into, from a terminal, so you stop
+copy-pasting by hand. It attaches to **your own** Chrome over the DevTools
+Protocol, types your prompt into the page, waits for the answer to finish, and
+prints it.
+
+This is UI automation of a session you own — the same category as Selenium or
+Playwright against your own logged-in app. It reads and writes only visible DOM.
+It does **not** read network traffic, request headers, cookies or tokens, and it
+sends nothing anywhere except to the local Chrome debugging port you opened.
+
+Zero npm dependencies — the CDP client is JSON over node's builtin WebSocket, so
+it runs where `npm install` is blocked. Node 18+ (for builtin `WebSocket`;
+Node 20+ recommended).
+
+## Launch Chrome with remote debugging
+
+The CLI connects to a debugging port. You start Chrome yourself; nothing here
+starts or configures a browser.
+
+**The Chrome 136+ gotcha:** for security, recent Chrome refuses
+`--remote-debugging-port` when pointed at your *default* profile directory. Use a
+separate `--user-data-dir` and sign in once in that window — cookies persist
+there, so you only sign in the first time.
+
+**Windows**
+```
+"C:\Program Files\Google\Chrome\Application\chrome.exe" ^
+  --remote-debugging-port=9222 ^
+  --user-data-dir="%TEMP%\copilot-cli-profile"
+```
+
+**macOS**
+```
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.copilot-cli-profile"
+```
+
+**Linux**
+```
+google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.copilot-cli-profile"
+```
+
+Edge works identically — same flags, `msedge` / `Microsoft Edge` as the binary.
+
+In that Chrome window: sign in and open your chat page. Confirm the port is up by
+visiting `http://127.0.0.1:9222/json/version` — you should see JSON.
+
+> The debugging port is unauthenticated and local. Anything on your machine that
+> can reach `127.0.0.1:9222` can drive that browser. Use a throwaway profile,
+> and close the debug window when you are done.
+
+## Two commands, run once
+
+**1. Probe the page** (read-only) so the selectors are known:
+```
+node probe.mjs
+```
+It prints — and saves to `copilot-cli-probe.txt` — one report block: the input
+box, send button, and answer-region candidates it found. Because page structure
+differs and changes over time, **paste that whole block back** and the selectors
+get pinned precisely.
+
+**2. Chat:**
+```
+node chat.mjs
+> summarize my last email from Jane
+...answer prints here...
+> /quit
+```
+
+The first answer that prints is proof the bridge works end to end.
+
+## When the DOM is not what the defaults expect
+
+`chat.mjs` auto-detects the input, send button and answer region with
+heuristics. If a turn misbehaves, the diagnostics tell you which step:
+
+- `/debug` — the last turn's step log: what it picked as input, how it sent
+  (Enter vs. clicking a button), how it extracted the answer, and the character
+  counts at each stage.
+- `[bridge] could not locate the input box` — run `node probe.mjs`, share the
+  report.
+- `[bridge] sent, but extracted no answer text` — the send worked; the answer
+  selector needs pinning.
+
+Pin any selector with an env var (values come from the probe report's `path`):
+```
+INPUT_SELECTOR='textarea[aria-label="Ask Copilot"]' \
+SEND_SELECTOR='button[aria-label="Send"]' \
+ANSWER_SELECTOR='[data-author-role="assistant"]' \
+node chat.mjs
+```
+
+Other env vars: `CDP_PORT` (9222), `CDP_HOST` (127.0.0.1), `TAB_MATCH`
+(`copilot.cloud.microsoft`), `QUIET_MS` (1500 — silence that counts as
+"done streaming"), `ANSWER_TIMEOUT_MS` (120000).
+
+## How a turn works
+
+1. `chat.mjs` finds your tab via `http://127.0.0.1:9222/json` and opens its CDP
+   WebSocket.
+2. Each prompt is run as one `Runtime.evaluate` of a self-contained function in
+   the page: it sets the input text (native setter + `input` event for
+   textareas; `execCommand('insertText')` for rich contenteditable editors),
+   sends (Enter, falling back to a send-button click), then waits on a
+   `MutationObserver` until the DOM has been quiet for `QUIET_MS` and no "stop
+   generating" control is present.
+3. It reads the newest answer block's text and returns it.
+
+Step 2 is the brittle part: it depends on the page's structure, which the
+vendor can change. That is what the probe and `/debug` are for — a break is a
+selector tweak, not a rewrite.
+
+## Files
+
+| File | Role |
+|---|---|
+| `probe.mjs` | One-shot read-only DOM inventory → report block |
+| `chat.mjs` | Interactive REPL |
+| `lib-cdp.mjs` | Minimal zero-dep CDP client |
+| `probe-fn.mjs` | The page-side inventory, shared by both |

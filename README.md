@@ -68,6 +68,17 @@ attachments listed but never written to disk, credential patterns redacted, and
 an offline self-test (`MAIL_SELFTEST=sample.eml`) so you can see the output shape
 without touching a real mailbox.
 
+## Talk to it from a CLI (attach to your own browser)
+
+[`copilot-cli/`](copilot-cli/) drives a chat web UI you are already signed into
+and prints the answer in your terminal, so you stop copy-pasting by hand. It
+attaches to your own Chrome over the DevTools Protocol — the standard
+"automate my own logged-in browser" approach, same category as Selenium or
+Playwright. It reads and writes only visible DOM; it does not touch network
+traffic, headers, cookies or tokens. Zero npm dependencies.
+
+Run `node probe.mjs` once to inventory the page, then `node chat.mjs` for an
+interactive REPL. See [`copilot-cli/README.md`](copilot-cli/README.md).
 ## Can this be a browser extension instead?
 
 [`ext-probe/`](ext-probe/) is a minimal MV3 extension that answers whether
