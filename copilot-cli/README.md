@@ -379,10 +379,33 @@ set NODE_EXTRA_CA_CERTS=C:\path\to\company-root.cer    # export it from certmgr.
 MAIL_TLS_INSECURE=1                              # last resort; stops checking altogether
 ```
 
-A 401 is reported with what the server said it wants. If it offers only
-`Negotiate`/`NTLM` and not `Basic`, that is named plainly rather than failing
-obscurely: this client speaks Basic over HTTPS, which is what the existing
-integration on this network uses.
+### Authentication: Basic, then NTLM
+
+An on-premises Exchange typically answers a Basic attempt with
+`WWW-Authenticate: Negotiate, NTLM` and no Basic at all. `MAIL_AUTH=auto`
+(the default) tries Basic, and on that refusal switches to **NTLMv2** with the
+same username and password — which is exactly what the existing Java
+integration on this network gets for free, since `ews-java-api` runs on
+Apache HttpClient and does NTLM under the covers.
+
+NTLM authenticates a *connection* rather than a request, so the client pins
+itself to one keep-alive socket and runs the three legs over it: negotiate,
+challenge, response. The real request rides on the third leg.
+
+MD4 is implemented in `lib-ntlm.mjs` rather than taken from `node:crypto`:
+OpenSSL 3 moved it to the legacy provider, so `createHash('md4')` throws on
+any current node, and the NT hash is defined as MD4 of the UTF-16LE password.
+It is checked against the published RFC 1320 and MS-NLMP vectors on every
+`--mail-check`, because a wrong MD4 produces a well-formed handshake that
+simply never authenticates — indistinguishable from a wrong password.
+
+Only NTLMv2 is sent; the LM response is left empty. If the server offers
+`Negotiate` alone, it wants Kerberos, which this client does not speak, and
+it says so.
+
+**If NTLM completes but is rejected, suspect the domain.** Set `MAIL_DOMAIN`,
+or write `MAIL_USER` as `DOMAIN\user`. A wrong domain fails identically to a
+wrong password.
 
 ### Two things to know before you point it at real mail
 

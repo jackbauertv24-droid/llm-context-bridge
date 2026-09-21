@@ -82,6 +82,9 @@ export function loadMailConfig({ root, envPath, env = process.env } = {}) {
     protocol,
     ewsUrl,
     ewsVersion: pick('MAIL_EWS_VERSION') || 'Exchange2010_SP2',
+    // auto tries Basic and falls back to NTLM when the server refuses it.
+    authMode: (pick('MAIL_AUTH') || 'auto').toLowerCase(),
+    domain: pick('MAIL_DOMAIN') || '',
     insecureTls: String(pick('MAIL_TLS_INSECURE') ?? '0') === '1',
     host: pick('MAIL_HOST'),
     port: Number(pick('MAIL_PORT') || 993),
@@ -198,6 +201,7 @@ async function readMailEws(cfg, { days, folder, limit, args }) {
   const ews = new EwsReader({
     url: cfg.ewsUrl, user: cfg.user, pass: cfg.pass,
     version: cfg.ewsVersion, insecureTls: cfg.insecureTls, timeoutMs: cfg.timeoutMs,
+    authMode: cfg.authMode, domain: cfg.domain,
   });
   const since = new Date(Date.now() - Math.max(0, days) * 86400000);
   const where = await ews.folderElement(folder);
@@ -291,6 +295,7 @@ export async function listFolders(cfg) {
     const ews = new EwsReader({
       url: cfg.ewsUrl, user: cfg.user, pass: cfg.pass,
       version: cfg.ewsVersion, insecureTls: cfg.insecureTls, timeoutMs: cfg.timeoutMs,
+      authMode: cfg.authMode, domain: cfg.domain,
     });
     const names = await ews.folders();
     return names.length ? names.join('\n') : '(the server listed no folders)';

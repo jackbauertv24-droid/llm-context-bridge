@@ -27,6 +27,7 @@
 
 import https from 'node:https';
 import http from 'node:http';
+import { createType1Message, parseType2Message, createType3Message, splitUser } from './lib-ntlm.mjs';
 
 export class EwsError extends Error {}
 
@@ -131,10 +132,116 @@ export function describeConnectionError(e, url) {
   return new EwsError(`cannot reach ${url.host} — ${e.message}`);
 }
 
+/** The authentication schemes a 401 says it will accept. */
+function offeredSchemes(headers) {
+  const raw = headers['www-authenticate'];
+  const all = Array.isArray(raw) ? raw : [raw || ''];
+  return all.join(', ').split(',').map((s) => s.trim().split(/\s+/)[0].toLowerCase()).filter(Boolean);
+}
+
 export class EwsReader {
   constructor(opts) {
     this.opts = opts;
     this.log = [];
+    // auto: try Basic, and switch to NTLM if the server will not take it.
+    this.authMode = (opts.authMode || 'auto').toLowerCase();
+    this.agent = null;
+  }
+
+  /**
+   * One keep-alive socket for the whole session.
+   *
+   * NTLM authenticates a *connection*, not a request: the challenge and the
+   * response have to travel over the same TCP socket, so the agent is pinned
+   * to a single one and reused for every later call.
+   */
+  #keepAliveAgent(isHttps) {
+    if (!this.agent) {
+      const Agent = isHttps ? https.Agent : http.Agent;
+      this.agent = new Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 });
+    }
+    return this.agent;
+  }
+
+  /** A single HTTP request. Returns status, headers and body; throws only on transport failure. */
+  #post(url, headers, body) {
+    const isHttps = url.protocol === 'https:';
+    return new Promise((resolve, reject) => {
+      const req = (isHttps ? https : http).request({
+        hostname: url.hostname,
+        port: url.port || (isHttps ? 443 : 80),
+        path: url.pathname + url.search,
+        method: 'POST',
+        agent: this.#keepAliveAgent(isHttps),
+        headers: {
+          'Content-Type': 'text/xml; charset=utf-8',
+          'Content-Length': Buffer.byteLength(body),
+          Accept: 'text/xml',
+          Connection: 'keep-alive',
+          'User-Agent': 'copilot-cli-mail/1.0',
+          ...headers,
+        },
+        rejectUnauthorized: this.opts.insecureTls !== true,
+        timeout: this.opts.timeoutMs || 30000,
+      }, (r) => {
+        const chunks = [];
+        r.on('data', (c) => chunks.push(c));
+        // The body must be drained even when it is not wanted, or the socket
+        // is never released back to the agent and the next leg opens a new
+        // connection — which loses the NTLM handshake.
+        r.on('end', () => resolve({ status: r.statusCode, headers: r.headers, body: Buffer.concat(chunks).toString('utf8') }));
+      });
+      req.on('timeout', () => req.destroy(new EwsError(`${url.host} stopped responding`)));
+      req.on('error', (e) => reject(describeConnectionError(e, url)));
+      req.end(body);
+    });
+  }
+
+  /** The three-leg NTLM handshake, then the real request on the same socket. */
+  async #ntlmPost(url, envelope) {
+    const { domain: fromUser, user } = splitUser(this.opts.user);
+    const domain = this.opts.domain || fromUser || '';
+
+    const negotiate = await this.#post(url, {
+      Authorization: `NTLM ${createType1Message().toString('base64')}`,
+    }, '');
+
+    if (negotiate.status !== 401) {
+      // Some servers accept the negotiate outright; nothing more to do.
+      if (negotiate.status === 200) return negotiate;
+      return negotiate;
+    }
+    const raw = negotiate.headers['www-authenticate'];
+    const all = Array.isArray(raw) ? raw : [raw || ''];
+    const challenge = all.map((h) => /^NTLM\s+(.+)$/i.exec(String(h).trim())).find(Boolean);
+    if (!challenge) {
+      throw new EwsError(
+        'the server offered NTLM but did not send a challenge. '
+        + (all.join(', ').toLowerCase().includes('negotiate')
+          ? 'It may be insisting on Kerberos, which this client does not speak.'
+          : `It answered: ${all.join(', ') || '(nothing)'}`),
+      );
+    }
+    const type2 = parseType2Message(challenge[1]);
+    const type3 = createType3Message({ user, domain, password: this.opts.pass, type2 });
+    return this.#post(url, { Authorization: `NTLM ${type3.toString('base64')}` }, envelope);
+  }
+
+  /** Send the envelope, choosing or discovering the authentication scheme. */
+  async #authorizedPost(url, envelope) {
+    if (this.authMode === 'ntlm') return this.#ntlmPost(url, envelope);
+
+    const basic = `Basic ${Buffer.from(`${this.opts.user}:${this.opts.pass}`).toString('base64')}`;
+    const res = await this.#post(url, { Authorization: basic }, envelope);
+    if (res.status === 401 && this.authMode === 'auto') {
+      const schemes = offeredSchemes(res.headers);
+      if (schemes.includes('ntlm')) {
+        // Remembered, so later calls in this session skip the failed attempt.
+        this.authMode = 'ntlm';
+        return this.#ntlmPost(url, envelope);
+      }
+    }
+    return res;
   }
 
   /** Build and send one SOAP request. The gate on mutation lives here. */
@@ -152,44 +259,20 @@ export class EwsReader {
 </soap:Envelope>`;
 
     const url = new URL(this.opts.url);
-    const isHttps = url.protocol === 'https:';
-    const auth = `Basic ${Buffer.from(`${this.opts.user}:${this.opts.pass}`).toString('base64')}`;
-
-    const res = await new Promise((resolve, reject) => {
-      const req = (isHttps ? https : http).request({
-        hostname: url.hostname,
-        port: url.port || (isHttps ? 443 : 80),
-        path: url.pathname + url.search,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'text/xml; charset=utf-8',
-          'Content-Length': Buffer.byteLength(envelope),
-          Authorization: auth,
-          Accept: 'text/xml',
-          'User-Agent': 'copilot-cli-mail/1.0',
-        },
-        // An on-premises Exchange often has an internal CA. Verification stays
-        // on unless it is explicitly turned off, and turning it off is a
-        // decision the operator makes in mail.env, not one made here.
-        rejectUnauthorized: this.opts.insecureTls !== true,
-        timeout: this.opts.timeoutMs || 30000,
-      }, (r) => {
-        const chunks = [];
-        r.on('data', (c) => chunks.push(c));
-        r.on('end', () => resolve({ status: r.statusCode, headers: r.headers, body: Buffer.concat(chunks).toString('utf8') }));
-      });
-      req.on('timeout', () => req.destroy(new EwsError(`${url.host} stopped responding`)));
-      req.on('error', (e) => reject(describeConnectionError(e, url)));
-      req.end(envelope);
-    });
+    const res = await this.#authorizedPost(url, envelope);
 
     if (res.status === 401) {
       const scheme = String(res.headers['www-authenticate'] || '');
+      const tried = this.authMode === 'ntlm' ? 'NTLM' : 'Basic';
       throw new EwsError(
-        `the server rejected the credentials (401)${scheme ? `; it offers: ${scheme}` : ''}. `
-        + (/negotiate|ntlm/i.test(scheme) && !/basic/i.test(scheme)
-          ? 'It wants NTLM or Kerberos rather than Basic, which this client does not speak.'
-          : 'Check MAIL_USER and MAIL_PASS — the user is often DOMAIN\\\\user rather than an address.'),
+        `the server rejected the credentials (401) after trying ${tried}${scheme ? `; it offers: ${scheme}` : ''}. `
+        + (tried === 'NTLM'
+          ? 'The handshake completed but the credentials were not accepted. Check the password, '
+            + 'and set MAIL_DOMAIN, or write MAIL_USER as DOMAIN\\\\user — NTLM needs the right domain '
+            + 'and a wrong one fails exactly like a wrong password.'
+          : /negotiate/i.test(scheme) && !/ntlm/i.test(scheme)
+            ? 'It wants Kerberos, which this client does not speak.'
+            : 'Check MAIL_USER and MAIL_PASS.'),
       );
     }
     if (res.status !== 200) {

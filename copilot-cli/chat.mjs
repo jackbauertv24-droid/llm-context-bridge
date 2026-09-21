@@ -24,7 +24,7 @@ import fs from 'node:fs';
 
 // Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
 // a previous build is otherwise indistinguishable from a fresh one.
-const VERSION = '2026-09-21.14';
+const VERSION = '2026-09-21.15';
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 import { askInPage } from './page-fn.mjs';
@@ -380,6 +380,10 @@ async function runMailCheck(args) {
     say(`endpoint: ${cfg.ewsUrl || '(unset)'}`);
     say(`declared server version: ${cfg.ewsVersion}`);
     say(`tls verification: ${cfg.insecureTls ? 'OFF (MAIL_TLS_INSECURE=1)' : 'on'}`);
+    say(`auth: ${cfg.authMode}${cfg.domain ? ` domain=${cfg.domain}` : ''}`);
+    const { selfTest } = await import('./lib-ntlm.mjs');
+    const ntlm = selfTest();
+    say(`ntlm primitives: ${ntlm.ok ? 'all published vectors match' : `FAILING: ${ntlm.failures.map((f) => f[0]).join(', ')}`}`);
   } else {
     say(`host: ${cfg.host || '(unset)'}:${cfg.port} tls=${cfg.useTls ? 'on' : 'off'}`);
   }
