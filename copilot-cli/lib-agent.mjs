@@ -33,7 +33,28 @@
 import { tools, ToolError } from './lib-fstools.mjs';
 
 const NS = 'copilot';
-const OPEN = new RegExp(`<${NS}:([a-z]+)((?:\\s+[a-z_]+\\s*=\\s*(?:"[^"]*"|'[^']*'))*)\\s*(/?)>`, 'g');
+// Anchored to the start of a line, and multiline, which is the rule the
+// prompt has always stated and the parser never enforced. Unanchored, a reply
+// that merely *talks about* the protocol executes it: asked for a code review,
+// the model writes "you could fix this with <copilot:edit path=...>" and the
+// bridge dutifully offers to edit the file. Reviewing a file that contains the
+// protocol — this repository, for one — does the same. A tag is an action; a
+// mention of a tag is prose, and column zero is what separates them.
+const OPEN = new RegExp(`^<${NS}:([a-z]+)((?:\\s+[a-z_]+\\s*=\\s*(?:"[^"]*"|'[^']*'))*)\\s*(/?)>`, 'gm');
+
+// Tag-shaped text that is NOT a call, so the user can be told when something
+// that looked like one was passed over rather than silently dropped.
+const MENTION = new RegExp(`<${NS}:[a-z]+`, 'g');
+
+export function countMentions(text) {
+  const src = stripFences(text);
+  let loose = 0;
+  for (const m of src.matchAll(MENTION)) {
+    const bol = m.index === 0 || src[m.index - 1] === '\n';
+    if (!bol) loose++;
+  }
+  return loose;
+}
 
 // ---------------------------------------------------------------- protocol
 
@@ -61,7 +82,10 @@ export function renderSystemPrompt(root) {
     '',
     '  The fence matters: it is what stops this chat from reformatting the tag',
     '  or the file content inside it. Never emit a tag outside a fence.',
-    '- A tool tag must start at the beginning of a line.',
+    '- A tool tag must start at the beginning of a line, in column one.',
+    '- A tag ANYWHERE in your reply is executed. It is not an illustration.',
+    '  Never quote, mention or give an example of a tag while explaining',
+    '  something. Describe the change in words instead.',
     '- Paths are relative to the workspace root. Never use absolute paths or "..".',
     '- Use edit to change a file that already exists, and write only to create a',
     '  new one or to replace a file wholesale.',
@@ -75,6 +99,14 @@ export function renderSystemPrompt(root) {
     '- After each reply that contains tags, you will be shown the results and can',
     '  continue. When the task is done, reply with prose and no tags at all.',
     '- Keep prose short. Say what you are about to do, not what you might do.',
+    '',
+    'WHEN NOT TO CHANGE ANYTHING',
+    '- If the task only asks you to look at code — review it, audit it, explain',
+    '  it, find a bug, answer a question about it — then read and list are the',
+    '  only tools you may use. Report what you found in prose and stop.',
+    '- Every write and edit interrupts the user to ask permission. Do not emit',
+    '  one unless the task actually asked for the file to change.',
+    '- Proposing a change is prose. Making one is a tag. Do not confuse them.',
     '',
     `The workspace root is ${root}`,
   );
@@ -142,11 +174,18 @@ export function parseToolTags(text) {
   return calls;
 }
 
-/** The prose part of a reply: everything before the first tag, fences removed. */
+/**
+ * The prose part of a reply: everything before the first real tag.
+ *
+ * Cutting at any mention of the namespace threw away most of a code review,
+ * because a review discusses the syntax rather than emitting it. Only a tag
+ * at the start of a line ends the prose.
+ */
 export function proseOf(text) {
   const src = stripFences(text);
-  const at = src.indexOf(`<${NS}:`);
-  return (at < 0 ? src : src.slice(0, at)).trim();
+  OPEN.lastIndex = 0;
+  const m = OPEN.exec(src);
+  return (m ? src.slice(0, m.index) : src).trim();
 }
 
 // Feeds results back as the next turn's prompt. Same tag shape as the calls, so
@@ -198,6 +237,13 @@ export async function runAgent({
     if (prose) ui.prose(prose);
 
     const calls = parseToolTags(reply);
+    // Tag-shaped text that was not in column one is passed over. Say so
+    // whether or not anything else ran: silence here would leave the user
+    // wondering why a file they were just told about never changed. Strict is
+    // the right default — executing a mention is far worse than skipping a
+    // misplaced call — but it must never be quiet.
+    const loose = countMentions(reply);
+    if (loose && ui.ignored) ui.ignored(loose);
     if (!calls.length) return { done: true, steps: step };
 
     const results = [];

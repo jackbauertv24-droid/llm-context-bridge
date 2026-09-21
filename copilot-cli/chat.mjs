@@ -24,7 +24,7 @@ import fs from 'node:fs';
 
 // Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
 // a previous build is otherwise indistinguishable from a fresh one.
-const VERSION = '2026-09-21.7';
+const VERSION = '2026-09-21.8';
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 import { askInPage } from './page-fn.mjs';
@@ -223,6 +223,7 @@ function agentUI() {
     },
     toolError: (label, msg) => note(`[agent] ${label} — FAILED: ${msg}`),
     skipped: (label) => note(`[agent] ${label} — skipped`),
+    ignored: (n) => note(`[agent] ignored ${n} tag-like mention${n === 1 ? '' : 's'} that were not at the start of a line`),
   };
 }
 

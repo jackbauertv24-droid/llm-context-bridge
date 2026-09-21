@@ -207,6 +207,25 @@ rendering with its whitespace intact — and the parser strips fences before
 reading tags. It accepts unfenced tags too, since which of the two actually
 comes back is a property of the page.
 
+### A tag is an action, not an illustration
+
+A tag only counts as a call when it starts at **column one** of a line. That
+rule was always in the prompt and was not enforced, which broke the first code
+review someone asked for: the model wrote "you could fix this with
+`<copilot:edit path=...>`" and the bridge offered to edit the file. Reviewing
+a file that contains the protocol — anything in this directory — did the same,
+and the review itself was truncated at the first mention.
+
+So the parser is anchored, and the prompt now says plainly that a tag anywhere
+in a reply is executed and must never be used as an example. A read-only task
+— review, audit, explain, find a bug — is told to use read and list only and
+report in prose.
+
+Anchoring is strict on purpose: executing a mention is far worse than skipping
+a call that was indented. It is never silent, though — anything tag-shaped
+that was passed over is reported as `ignored N tag-like mentions`, so a call
+that did not run is visible rather than mysterious.
+
 ### What it is allowed to do
 
 Everything is confined to the workspace root: the current directory, or
