@@ -177,7 +177,7 @@ async function runReplay(file, args) {
   return true;
 }
 
-async function attach() {
+async function attach({ fatal = true } = {}) {
   let target;
   try {
     target = await findTab(CONFIG);
@@ -185,13 +185,35 @@ async function attach() {
     note(`\nCould not attach to Chrome at ${CONFIG.host}:${CONFIG.port}.`);
     note(e.message);
     note('\nLaunch Chrome with remote debugging first (README > "Launch Chrome"), open the chat, and retry.');
+    if (!fatal) return null;
     process.exit(1);
   }
   note(`copilot-cli ${VERSION} — attached to: ${target.url}`);
   const cdp = new CDP(target.webSocketDebuggerUrl);
-  await cdp.connect();
-  await cdp.send('Runtime.enable');
+  try {
+    await cdp.connect();
+    await cdp.send('Runtime.enable');
+  } catch (e) {
+    note('[bridge] found the tab but could not open a DevTools session: ' + e.message);
+    if (!fatal) return null;
+    process.exit(1);
+  }
   return cdp;
+}
+
+/**
+ * A Copilot conversation is a single-page app: starting a new chat, or the tab
+ * being closed and reopened, destroys the DevTools target underneath us. That
+ * used to make every later turn fail with "CDP closed" until the CLI was
+ * restarted. Reconnect instead, once, before each turn.
+ */
+async function ensureAttached(cdp) {
+  if (cdp && cdp.live) return cdp;
+  note('[bridge] the page connection went away (navigation, or the tab closed) — reattaching…');
+  try { if (cdp) cdp.close(); } catch { /* already gone */ }
+  const next = await attach({ fatal: false });
+  if (!next) note('[bridge] still not attached; fix the tab and send again.');
+  return next;
 }
 
 async function main() {
@@ -207,7 +229,7 @@ async function main() {
   const piped = !process.stdin.isTTY;
   const stdinText = piped ? await readStdin() : '';
 
-  const cdp = await attach();
+  let cdp = await attach();
 
   // One shot: a prompt on the command line, or anything piped in.
   if (argvPrompt || stdinText.trim()) {
@@ -233,6 +255,8 @@ async function main() {
     }
     if (q === '/debug') { note(lastDebug ? JSON.stringify(lastDebug, null, 2) : '(no turn yet)'); rl.prompt(); return; }
     if (q === '/probe') {
+      cdp = await ensureAttached(cdp);
+      if (!cdp) { rl.prompt(); return; }
       try {
         const { pageInventory } = await import('./probe-fn.mjs');
         const rep = await cdp.evalFn(pageInventory);
@@ -242,12 +266,13 @@ async function main() {
     }
 
     out('');
-    await runTurn(cdp, q, '');
+    cdp = await ensureAttached(cdp);
+    if (cdp) await runTurn(cdp, q, '');
     out('');
     rl.prompt();
   });
 
-  rl.on('close', () => { cdp.close(); note('\nbye'); process.exit(0); });
+  rl.on('close', () => { if (cdp) cdp.close(); note('\nbye'); process.exit(0); });
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

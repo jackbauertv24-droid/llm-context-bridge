@@ -31,11 +31,23 @@ export class CDP {
   constructor(wsUrl) { this.wsUrl = wsUrl; this.id = 0; this.pending = new Map(); this.listeners = []; }
 
   connect() {
+    // Node gained a global WebSocket in 22. On an older runtime the failure is
+    // otherwise a bare "WebSocket is not defined" from inside a promise, which
+    // reads like a bug in the bridge rather than a runtime to upgrade.
+    if (typeof WebSocket === 'undefined') {
+      return Promise.reject(new Error(
+        `this Node (${process.version}) has no global WebSocket. Use Node 22 or newer, `
+        + 'or on 20/21 run: node --experimental-websocket chat.mjs'));
+    }
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(this.wsUrl);
       this.ws.onopen = () => resolve();
       this.ws.onerror = () => reject(new Error('CDP websocket failed to open'));
-      this.ws.onclose = () => { for (const { reject } of this.pending.values()) reject(new Error('CDP closed')); };
+      this.ws.onclose = () => {
+        this.closed = true;
+        for (const { reject } of this.pending.values()) reject(new Error('CDP closed'));
+        this.pending.clear();
+      };
       this.ws.onmessage = (ev) => {
         const msg = JSON.parse(ev.data);
         if (msg.id && this.pending.has(msg.id)) {
@@ -51,7 +63,11 @@ export class CDP {
 
   on(fn) { this.listeners.push(fn); }
 
+  /** Whether this session can still carry a request. */
+  get live() { return !this.closed && !!this.ws && this.ws.readyState === 1; }
+
   send(method, params = {}, timeoutMs = 20000) {
+    if (!this.live) return Promise.reject(new Error('CDP closed'));
     const id = ++this.id;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
