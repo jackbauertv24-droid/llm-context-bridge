@@ -366,6 +366,19 @@ the model would receive it. It then prints every request it sent — for EWS,
 the operation names — so you can see for yourself that all of them are reads,
 and writes the lot to `copilot-cli-mailcheck.txt`.
 
+If the server uses a certificate from a company authority — normal for an
+on-premises Exchange — the first run fails with `unable to verify the first
+certificate`. That is a trust problem, not a connection problem: the server
+answered fine. The check then reports the certificate chain it was offered,
+naming the root to install, which it obtains with a bare handshake that sends
+no credentials and makes no request. Three fixes, best first:
+
+```sh
+node --use-system-ca chat.mjs --mail-check       # node 22.15+/23.5+, uses the Windows store
+set NODE_EXTRA_CA_CERTS=C:\path\to\company-root.cer    # export it from certmgr.msc
+MAIL_TLS_INSECURE=1                              # last resort; stops checking altogether
+```
+
 A 401 is reported with what the server said it wants. If it offers only
 `Negotiate`/`NTLM` and not `Basic`, that is named plainly rather than failing
 obscurely: this client speaks Basic over HTTPS, which is what the existing

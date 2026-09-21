@@ -92,6 +92,45 @@ export function ewsDate(d) {
   return `${d.toISOString().replace(/\.\d+Z$/, 'Z')}`;
 }
 
+// Certificate problems are not connectivity problems, and saying "cannot
+// reach" for one sends the reader off checking firewalls. An internal
+// certificate authority is the normal case for an on-premises Exchange, so
+// the error says which it is and what to do about it.
+const TRUST_CODES = new Set([
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_UNTRUSTED',
+]);
+
+export function describeConnectionError(e, url) {
+  const code = e.code || '';
+  if (TRUST_CODES.has(code)) {
+    return new EwsError(
+      `${url.host} presented a certificate this machine does not trust (${code}). `
+      + 'That is normal for an internal Exchange with a company certificate authority, '
+      + 'and it is a trust problem, not a connection problem — the server answered fine. '
+      + 'Fix it in one of three ways, best first: run node with --use-system-ca so it '
+      + 'uses the Windows certificate store; or export your company root CA to a .pem '
+      + 'and set NODE_EXTRA_CA_CERTS to it; or, as a last resort, set '
+      + 'MAIL_TLS_INSECURE=1 in mail.env, which stops the certificate being checked '
+      + 'at all and should not be left on.',
+    );
+  }
+  if (code === 'ERR_TLS_CERT_ALTNAME_INVALID') {
+    return new EwsError(
+      `${url.host} presented a certificate issued to a different name (${e.message}). `
+      + 'Use the host the certificate is actually for in MAIL_EWS_URL.',
+    );
+  }
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    return new EwsError(`${url.host} does not resolve from this machine — check the name, or the VPN.`);
+  }
+  if (code === 'ECONNREFUSED' || code === 'ETIMEDOUT' || code === 'EHOSTUNREACH') {
+    return new EwsError(`cannot reach ${url.host} (${code}) — check the VPN or a firewall.`);
+  }
+  return new EwsError(`cannot reach ${url.host} — ${e.message}`);
+}
+
 export class EwsReader {
   constructor(opts) {
     this.opts = opts;
@@ -140,7 +179,7 @@ export class EwsReader {
         r.on('end', () => resolve({ status: r.statusCode, headers: r.headers, body: Buffer.concat(chunks).toString('utf8') }));
       });
       req.on('timeout', () => req.destroy(new EwsError(`${url.host} stopped responding`)));
-      req.on('error', (e) => reject(new EwsError(`cannot reach ${url.host} — ${e.message}`)));
+      req.on('error', (e) => reject(describeConnectionError(e, url)));
       req.end(envelope);
     });
 

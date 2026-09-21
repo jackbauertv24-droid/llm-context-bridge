@@ -24,7 +24,7 @@ import fs from 'node:fs';
 
 // Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
 // a previous build is otherwise indistinguishable from a fresh one.
-const VERSION = '2026-09-21.13';
+const VERSION = '2026-09-21.14';
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 import { askInPage } from './page-fn.mjs';
@@ -312,6 +312,57 @@ async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv }
  * touches a live mailbox, so it reads exactly one message and prints every
  * IMAP command it sent, which is the evidence that nothing was mutated.
  */
+/**
+ * Report the certificate chain a host presents, without trusting it.
+ *
+ * This is a handshake and nothing more: no credentials are sent, no request
+ * is made, the socket is closed as soon as the chain is known. It exists so
+ * that "which CA do I need to install" is answered by the same run that hit
+ * the problem, rather than by another one.
+ */
+async function describeCertificate(urlString) {
+  const tls = await import('node:tls');
+  const url = new URL(urlString);
+  return new Promise((resolve) => {
+    const out = [];
+    const sock = tls.connect({
+      host: url.hostname,
+      port: Number(url.port) || 443,
+      servername: url.hostname,
+      rejectUnauthorized: false,
+      timeout: 10000,
+    }, () => {
+      let cert = sock.getPeerCertificate(true);
+      const seen = new Set();
+      let depth = 0;
+      while (cert && cert.subject && !seen.has(cert.fingerprint256 || String(depth))) {
+        seen.add(cert.fingerprint256 || String(depth));
+        const sub = cert.subject.CN || cert.subject.O || '(no common name)';
+        const iss = (cert.issuer && (cert.issuer.CN || cert.issuer.O)) || '(unknown issuer)';
+        out.push(`${depth === 0 ? 'server ' : `issuer ${depth}`}: ${sub}`);
+        out.push(`${' '.repeat(9)}signed by: ${iss}`);
+        if (depth === 0 && cert.valid_to) out.push(`${' '.repeat(9)}valid to: ${cert.valid_to}`);
+        if (cert.issuerCertificate === cert) {
+          out.push(`${' '.repeat(9)}(self-signed root — this is the certificate to install)`);
+          break;
+        }
+        cert = cert.issuerCertificate;
+        depth++;
+      }
+      if (!out.length) out.push('the server sent no certificate this build could read');
+      out.push('');
+      out.push('The topmost name above is your company root CA. Export it from the');
+      out.push('Windows store (certmgr.msc > Trusted Root Certification Authorities)');
+      out.push('as Base-64 .cer, then set NODE_EXTRA_CA_CERTS to that file.');
+      out.push('No credentials were sent and no request was made to get this.');
+      sock.end();
+      resolve(out);
+    });
+    sock.on('timeout', () => { sock.destroy(); resolve(['(timed out fetching the certificate)']); });
+    sock.on('error', (e) => resolve([`(could not fetch the certificate: ${e.message})`]));
+  });
+}
+
 async function runMailCheck(args) {
   const mailEnv = takeFlag(args, '--mail-env');
   const rootArg = takeFlag(args, '--root');
@@ -322,7 +373,7 @@ async function runMailCheck(args) {
   const lines = [];
   const say = (t = '') => { lines.push(t); note(t); };
 
-  say(`copilot-cli ${VERSION} — mail check`);
+  say(`copilot-cli ${VERSION} — mail check   (node ${process.version})`);
   say(`settings from: ${cfg.source || '(no mail.env found; using the environment)'}`);
   say(`protocol: ${cfg.protocol.toUpperCase()}`);
   if (cfg.protocol === 'ews') {
@@ -349,6 +400,7 @@ async function runMailCheck(args) {
 
   let ok = true;
   let commands = [];
+  let gotMessage = false;
   try {
     say(`folders on the server:`);
     const names = await listFolders(cfg);
@@ -362,9 +414,18 @@ async function runMailCheck(args) {
     say('--- what the model would be given ---');
     say(res.text);
     say('--- end ---');
+    gotMessage = res.count > 0;
   } catch (e) {
     ok = false;
     say(`FAILED: ${e.message}`);
+    // A trust failure is the one error where the next step depends on a fact
+    // only the server can supply: which authority signed its certificate.
+    // Fetching that here means the fix does not cost another round trip.
+    if (/does not trust/.test(e.message) && cfg.protocol === 'ews') {
+      say('');
+      say('looking at the certificate it presented, so you know which CA to trust...');
+      for (const line of await describeCertificate(cfg.ewsUrl)) say(`  ${line}`);
+    }
   }
 
   say('');
@@ -372,17 +433,19 @@ async function runMailCheck(args) {
   for (const c of commands) say(`  ${c.replace(/^(LOGIN\s+\S+\s+).*$/i, '$1"[redacted]"')}`);
   const MUTATORS = /^(SELECT|STORE|APPEND|COPY|MOVE|EXPUNGE|CREATE|DELETE|RENAME|UID (STORE|COPY|MOVE)|UpdateItem|CreateItem|SendItem|DeleteItem|MoveItem|CopyItem|MarkAllItemsAsRead)\b/i;
   const mutating = commands.filter((c) => MUTATORS.test(c));
-  say(mutating.length
-    ? `WARNING: ${mutating.length} request(s) could have changed the server — this is a bug, please report it`
-    : (cfg.protocol === 'ews'
-      ? 'all of them are reads: FindFolder, FindItem and GetItem only. No UpdateItem, so no read flag was set; no SendItem, so nothing was sent.'
-      : 'none of them can change anything on the server: no SELECT, no STORE, no flags, no deletes.'));
+  say(commands.length === 0
+    ? '  (none — it failed before any request was sent, so the mailbox was not touched at all)'
+    : mutating.length
+      ? `WARNING: ${mutating.length} request(s) could have changed the server — this is a bug, please report it`
+      : (cfg.protocol === 'ews'
+        ? 'all of them are reads: FindFolder, FindItem and GetItem only. No UpdateItem, so no read flag was set; no SendItem, so nothing was sent.'
+        : 'none of them can change anything on the server: no SELECT, no STORE, no flags, no deletes.'));
 
   try {
     fs.writeFileSync('copilot-cli-mailcheck.txt', lines.join('\n') + '\n');
     note('');
     note('[mail] written to copilot-cli-mailcheck.txt — that file is the whole report.');
-    note('[mail] it contains one real message; redact it before sharing if you need to.');
+    if (gotMessage) note('[mail] it contains one real message; redact it before sharing if you need to.');
   } catch { /* the report on screen is the important one */ }
   return ok;
 }
