@@ -162,3 +162,28 @@ selector tweak, not a rewrite.
 | `chat.mjs` | Interactive REPL |
 | `lib-cdp.mjs` | Minimal zero-dep CDP client |
 | `probe-fn.mjs` | The page-side inventory, shared by both |
+| `page-fn.mjs` | The function evaluated in the tab: type, send, wait, extract |
+| `lib-files.mjs` | `@path` expansion into attachment blocks |
+| `test/dom-shim.mjs` | A hand-written DOM, so extraction is testable offline |
+
+## Tests
+
+```sh
+node --test test/files.test.mjs test/extract.test.mjs
+```
+
+32 cases, no browser and no network. `extract.test.mjs` runs the real page
+function against a replica of Copilot's DOM — the structure taken from a live
+probe, not invented — and every case in it is a failure that actually happened:
+the suggestion chips printed as an answer, the first characters of a reply
+going missing, the prompt echoed back as its own answer, a reply streamed into
+an element that already existed, and a send that never registered being
+reported as a send fault rather than a selector one.
+
+## When an answer still comes out wrong
+
+Every turn writes two files. `copilot-cli-lastturn.txt` is small and
+pasteable: the build, every extraction strategy that ran, what each produced
+and how it scored. `copilot-cli-capture.json` is a structured dump of the
+conversation region. Together they are enough to diagnose and fix a bad pick
+without running anything again.

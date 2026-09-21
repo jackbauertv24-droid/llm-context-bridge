@@ -24,9 +24,10 @@ import fs from 'node:fs';
 
 // Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
 // a previous build is otherwise indistinguishable from a fresh one.
-const VERSION = '2026-09-21.3';
+const VERSION = '2026-09-21.4';
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
+import { askInPage } from './page-fn.mjs';
 
 const CONFIG = {
   host: process.env.CDP_HOST || '127.0.0.1',
@@ -52,222 +53,6 @@ const LOCAL = {
 };
 
 let lastDebug = null;
-
-// ------------------------------------------------------------------ page side
-
-// Serialized and run inside the tab. Self-contained: no outer references.
-async function askInPage(cfg) {
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const vis = (el) => {
-    const r = el.getBoundingClientRect();
-    const st = getComputedStyle(el);
-    return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
-  };
-  const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
-  // A short, readable path for an element, so a bad pick can be turned into a
-  // pinned selector without a separate probe run.
-  const pathOf = (el) => {
-    const bits = [];
-    for (let e = el; e && e.nodeType === 1 && bits.length < 4; e = e.parentElement) {
-      let s = e.tagName.toLowerCase();
-      if (e.id) s += '#' + e.id;
-      const role = e.getAttribute('data-author-role') || e.getAttribute('data-testid') || e.getAttribute('role');
-      if (role) s += `[${role}]`;
-      const cls = (e.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean).slice(0, 2);
-      if (cls.length) s += '.' + cls.join('.');
-      bits.unshift(s);
-    }
-    return bits.join(' > ');
-  };
-  const debug = { steps: [], candidates: [] };
-  const log = (s) => debug.steps.push(s);
-
-  // 1. locate the input box
-  let input = cfg.inputSelector ? document.querySelector(cfg.inputSelector) : null;
-  if (!input) {
-    const cands = [...document.querySelectorAll('textarea, [contenteditable=""], [contenteditable="true"], [role="textbox"], input[type="text"]')]
-      .filter(vis)
-      .map((el) => {
-        const r = el.getBoundingClientRect();
-        const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('placeholder') || ''} ${el.getAttribute('data-placeholder') || ''}`.toLowerCase();
-        let score = r.y;                                  // lower on screen is better
-        if (/ask|message|copilot|chat|prompt|type/.test(label)) score += 100000;
-        if (r.width > 300) score += 5000;
-        return { el, score };
-      })
-      .sort((a, b) => b.score - a.score);
-    input = cands[0]?.el || null;
-  }
-  if (!input) { log('no input element found'); return { ok: false, debug }; }
-  log(`input: <${input.tagName.toLowerCase()}> editable=${input.isContentEditable} aria="${input.getAttribute('aria-label') || ''}" at ${pathOf(input)}`);
-
-  // 2. Baseline BEFORE the prompt is typed. Measuring it after meant that
-  // clearing the composer on send shifted every later offset, which is what
-  // chopped the first characters off the answer.
-  const bodyBaseLen = document.body.innerText.length;
-  const composer = input.closest('form') || input.parentElement;
-
-  // 3. set text
-  input.focus();
-  if (input.isContentEditable) {
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    const range = document.createRange();
-    range.selectNodeContents(input);
-    sel.addRange(range);
-    document.execCommand('delete', false);
-    document.execCommand('insertText', false, cfg.prompt);   // fires beforeinput/input for React/Lexical/ProseMirror
-    if (!input.innerText.trim()) { input.textContent = cfg.prompt; input.dispatchEvent(new InputEvent('input', { bubbles: true })); }
-  } else {
-    const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-    setter.call(input, cfg.prompt);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-  await sleep(60);
-  log(`text set, input now holds ${(input.value || input.innerText || '').length} chars`);
-
-  const answerBlocks = () => {
-    if (cfg.answerSelector) {
-      const pinned = [...document.querySelectorAll(cfg.answerSelector)].filter(vis);
-      if (pinned.length) return pinned;
-    }
-    const sel = '[data-author-role="assistant"], [data-testid*="assistant" i], [class*="assistant" i], [class*="response" i], [role="listitem"]';
-    return [...document.querySelectorAll(sel)].filter(vis);
-  };
-  const baseBlocks = answerBlocks();
-  const baseSet = new Set(baseBlocks);
-  const baseCount = baseBlocks.length;
-
-  // 4. Watch what the page adds. Tracking the actual added nodes is what makes
-  // extraction independent of the page's class names: the answer is the
-  // largest new block that is not our own echoed prompt.
-  const added = new Set();
-  let lastMutation = Date.now();
-  const obs = new MutationObserver((muts) => {
-    lastMutation = Date.now();
-    for (const m of muts) {
-      if (m.type === 'childList') { for (const n of m.addedNodes) if (n.nodeType === 1) added.add(n); }
-      else if (m.target) { const p = m.target.parentElement; if (p) added.add(p); }
-    }
-  });
-  obs.observe(document.body, { subtree: true, childList: true, characterData: true });
-
-  // 5. send: Enter first, click a send button as fallback
-  const fireEnter = (el) => {
-    for (const type of ['keydown', 'keypress', 'keyup']) {
-      el.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-    }
-  };
-  fireEnter(input);
-  await sleep(400);
-  const stillHasText = (input.value || input.innerText || '').includes(cfg.prompt.slice(0, 20));
-  if (stillHasText) {
-    let btn = cfg.sendSelector ? document.querySelector(cfg.sendSelector) : null;
-    if (!btn) {
-      btn = [...document.querySelectorAll('button, [role="button"]')].filter(vis).find((el) => {
-        const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`.toLowerCase();
-        return /send|submit/.test(label) && !(el.disabled || el.getAttribute('aria-disabled') === 'true');
-      });
-    }
-    if (btn) { btn.click(); log(`Enter left text in place; clicked send button aria="${btn.getAttribute('aria-label') || ''}"`); }
-    else log('Enter left text in place and no send button found — send may have failed');
-  } else {
-    log('sent via Enter');
-  }
-
-  // 6. wait for streaming to settle
-  await new Promise((resolve) => {
-    const t0 = Date.now();
-    const iv = setInterval(() => {
-      const stop = document.querySelector('button[aria-label*="stop" i], button[title*="stop" i], [data-testid*="stop" i]');
-      // 'The page got 5 characters longer' was satisfied the moment our own
-      // prompt was echoed, so a quiet second while Copilot was still thinking
-      // counted as a finished answer. Require either a genuinely new answer
-      // block, or growth beyond the prompt we just added.
-      const newBlock = answerBlocks().some((el) => !baseSet.has(el));
-      const grew = newBlock || document.body.innerText.length > bodyBaseLen + cfg.prompt.length + 20;
-      const quiet = Date.now() - lastMutation > cfg.quietMs;
-      if ((quiet && !stop && grew) || Date.now() - t0 > cfg.answerTimeoutMs) {
-        clearInterval(iv); resolve();
-      }
-    }, 250);
-  });
-  obs.disconnect();
-
-  // 7. extract. Page furniture that rides along with the answer region.
-  const JUNK = [
-    /^AI-generated content may be incorrect\.?$/i,
-    /^Message Copilot\.?$/i,
-    /^(Copilot|You said|Copilot said)$/i,
-    /^(Copy|Edit|Like|Dislike|Retry|Regenerate|Share|Export|Stop responding)$/i,
-  ];
-  const clean = (t) => t.split('\n').filter((ln) => !JUNK.some((re) => re.test(ln.trim()))).join('\n').trim();
-
-  const promptHead = norm(cfg.prompt).slice(0, 60);
-  let text = '';
-  let method = '';
-
-  // 7a. An element matching the answer selector that was not there before we
-  // sent. This is the reliable path: the selector is a fact from the probe,
-  // everything below it is inference.
-  const afterBlocks = answerBlocks();
-  const freshBlocks = afterBlocks.filter((el) => !baseSet.has(el));
-  if (freshBlocks.length) {
-    text = clean(freshBlocks[freshBlocks.length - 1].innerText || '');
-    method = `answer-selector new block (${freshBlocks.length} new, ${pathOf(freshBlocks[freshBlocks.length - 1])})`;
-  } else if (cfg.answerSelector && afterBlocks.length > baseCount) {
-    text = clean(afterBlocks[afterBlocks.length - 1].innerText || '');
-    method = `answer-selector last block (count ${baseCount}->${afterBlocks.length})`;
-  }
-
-  // 7b. Otherwise, the largest block the page added. A MutationObserver reports
-  // only the outermost node of an insertion, so when the page appends a whole
-  // turn — your message and the reply together — the one candidate it hands us
-  // contains our own prompt. Discarding it outright left nothing but the
-  // suggestion chips, which is exactly what got printed as an "answer". So
-  // descend into such a container instead of dropping it.
-  if (!text) {
-    const answerParts = (el, depth = 0) => {
-      const t = norm(el.innerText || '');
-      if (!t) return [];
-      if (depth < 6 && promptHead && t.includes(promptHead)) {
-        return [...el.children].flatMap((c) => answerParts(c, depth + 1));
-      }
-      return [el];
-    };
-    const fresh = [...added].filter((el) => el.isConnected && el.nodeType === 1
-      && !(composer && composer.contains(el)) && !el.contains(input));
-    const useful = fresh.flatMap((el) => answerParts(el));
-    const tops = useful.filter((el) => !useful.some((o) => o !== el && o.contains(el)));
-    tops.sort((a, b) => (b.innerText || '').length - (a.innerText || '').length);
-    debug.candidates = tops.slice(0, 5).map((el) => ({ path: pathOf(el), chars: (el.innerText || '').length }));
-    if (tops.length) {
-      text = clean(tops[0].innerText || '');
-      method = `added-node[largest] of ${tops.length} (${pathOf(tops[0])})`;
-    }
-  }
-
-  // 7c. Last resort: whatever text the page gained. Baselined before typing,
-  // so the prompt echo is inside the slice and gets stripped rather than
-  // eating the start of the answer.
-  if (!text) {
-    const suffix = document.body.innerText.slice(bodyBaseLen);
-    const idx = suffix.indexOf(cfg.prompt.slice(0, 20));
-    const cut = idx !== -1 ? suffix.slice(idx + cfg.prompt.length) : suffix;
-    text = clean(cut);
-    method = 'body-innerText suffix (heuristic; pin ANSWER_SELECTOR from debug.candidates)';
-  }
-
-  // A turn that added no answer block at all almost always means the send did
-  // not take, which is a different problem from a bad selector — say which.
-  if (afterBlocks.length === baseCount && !freshBlocks.length) {
-    log(`WARNING: no new answer block appeared (still ${baseCount}); the send may not have registered`);
-  }
-
-  log(`extracted via ${method}, ${text.length} chars`);
-  return { ok: true, text, method, debug };
-}
 
 // ------------------------------------------------------------------ CLI side
 
@@ -329,11 +114,25 @@ async function runTurn(cdp, raw, stdinText) {
     return false;
   }
   lastDebug = res.debug;
+  // Two files: a small one that is pasteable, and the DOM capture that makes
+  // a wrong answer fixable without asking for another run.
+  const capture = res.debug && res.debug.capture;
+  if (res.debug) delete res.debug.capture;
   try {
-    fs.writeFileSync('copilot-cli-lastturn.txt', JSON.stringify({ version: VERSION, when: new Date().toISOString(), method: res.method, chars: (res.text || '').length, debug: res.debug }, null, 2) + '\n');
+    fs.writeFileSync('copilot-cli-lastturn.txt', JSON.stringify({
+      version: VERSION, when: new Date().toISOString(),
+      method: res.method, chars: (res.text || '').length, debug: res.debug,
+    }, null, 2) + '\n');
+    if (capture) fs.writeFileSync('copilot-cli-capture.json', JSON.stringify(capture, null, 1) + '\n');
   } catch { /* diagnostics are a nicety, never a reason to fail a turn */ }
-  if (res.method && res.method.startsWith('body-innerText')) {
-    note('[bridge] fell back to whole-page text; paste copilot-cli-lastturn.txt to get the answer selector pinned.');
+
+  // Say so when the pick looks doubtful, rather than printing it as if sound.
+  const best = res.debug && res.debug.candidates && res.debug.candidates[0];
+  const doubtful = !res.text || (best && (best.mostlyButtons || best.containsPrompt))
+    || (res.method || '').startsWith('body-suffix');
+  if (doubtful) {
+    note('[bridge] this answer may be wrong — the best candidate looked like page furniture.');
+    note('[bridge] paste copilot-cli-lastturn.txt AND copilot-cli-capture.json; both together are enough to fix it with no further run.');
   }
   if (!res.ok) { note('[bridge] could not locate the input box. Run node probe.mjs and share the report.'); return false; }
   if (!res.text) { note('[bridge] sent, but extracted no answer text. Run /debug — likely an ANSWER_SELECTOR tweak.'); return false; }
