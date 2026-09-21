@@ -322,15 +322,21 @@ edit: {
       // mkdir happened after the check, so confirm the parent is still ours.
       assertInside(rootReal, realpathSync(dirname(full)), a.path);
 
+      // The tag body had one trailing newline removed as syntax (see
+      // parseToolTags); a file should still end with one. Without this every
+      // file the agent writes is a byte short, and read -> write of an
+      // unchanged file shows up as a diff.
+      const contents = body === '' || body.endsWith('\n') ? body : body + '\n';
+
       const fd = openRegular(full, a.path, { write: true });
       try {
-        writeSync(fd, body);
+        writeSync(fd, contents);
       } finally {
         closeSync(fd);
       }
-      const lines = body.split('\n').length;
+      const lines = contents.split('\n').length;
       return `${existed ? 'overwrote' : 'created'} ${a.path} `
-        + `(${lines} lines, ${Buffer.byteLength(body)} bytes)`;
+        + `(${lines} lines, ${Buffer.byteLength(contents)} bytes)`;
     },
   },
 

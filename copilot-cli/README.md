@@ -163,6 +163,7 @@ selector tweak, not a rewrite.
 | `page-fn.mjs` | The function evaluated in the tab: type, send, wait, extract |
 | `lib-files.mjs` | `@path` expansion into attachment blocks |
 | `lib-agent.mjs` | The agent loop and tool-tag protocol (ported from clichat) |
+| `PORTING-BACK-TO-CLICHAT.md` | The fixes found here that clichat still needs |
 | `lib-fstools.mjs` | read / write / list / edit, confined to one directory |
 | `lib-dom.mjs` | A hand-written DOM, so the page function runs with no browser |
 | `lib-replay.mjs` | Rebuilds a saved capture and re-runs extraction against it |
@@ -225,6 +226,11 @@ Anchoring is strict on purpose: executing a mention is far worse than skipping
 a call that was indented. It is never silent, though — anything tag-shaped
 that was passed over is reported as `ignored N tag-like mentions`, so a call
 that did not run is visible rather than mysterious.
+
+clichat, where this harness came from, has the same unanchored regex and the
+same gap in its prompt. [PORTING-BACK-TO-CLICHAT.md](PORTING-BACK-TO-CLICHAT.md)
+is the spec for applying these fixes there, written to be followed with only
+that checkout in hand.
 
 ### What it is allowed to do
 
