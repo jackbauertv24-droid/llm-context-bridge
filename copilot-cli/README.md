@@ -165,6 +165,9 @@ selector tweak, not a rewrite.
 | `lib-agent.mjs` | The agent loop and tool-tag protocol (ported from clichat) |
 | `PORTING-BACK-TO-CLICHAT.md` | The fixes found here that clichat still needs |
 | `lib-fstools.mjs` | read / write / list / edit, confined to one directory |
+| `lib-mailtool.mjs` | the mail tools, their settings and redaction |
+| `lib-imap.mjs` | a read-only IMAP client, zero dependencies |
+| `lib-mime.mjs` | turning a raw message into readable text |
 | `lib-dom.mjs` | A hand-written DOM, so the page function runs with no browser |
 | `lib-replay.mjs` | Rebuilds a saved capture and re-runs extraction against it |
 
@@ -192,6 +195,8 @@ Schema:
 | `<copilot:list path="..."/>` | list a directory |
 | `<copilot:write path="...">…</copilot:write>` | create or replace a file |
 | `<copilot:edit path="...">…</copilot:edit>` | a SEARCH/REPLACE block |
+| `<copilot:mail days="10"/>` | read recent mail (only when configured) |
+| `<copilot:mailboxes/>` | list mail folders (only when configured) |
 
 The grammar is a tag with a **raw body**, not JSON, because the thing an agent
 mostly emits is the contents of a source file — and a model that was never
@@ -284,6 +289,92 @@ control was ever visible), `stale-stop-control` (the safety net) or
 `timeout`. If yours says `quiet` every time, the stop control is not being
 found — pin it with `STOP_SELECTOR` and the turn gets about a second and a
 half shorter.
+
+## Reading mail
+
+The agent can read a window of recent mail and work from it:
+
+```sh
+node chat.mjs --agent "summarise anything from the last 10 days that needs a reply"
+```
+
+```
+<copilot:mail days="10"/>
+<copilot:mail days="30" folder="Sent Items" from="alice@" subject="invoice"/>
+<copilot:mail days="7" unread="true" limit="10"/>
+<copilot:mailboxes/>
+```
+
+### It cannot change anything, including the read flag
+
+This is the constraint the feature was built around, so it is enforced four
+times over rather than trusted to care:
+
+1. **The mailbox is opened with `EXAMINE`, never `SELECT`.** `EXAMINE` is the
+   read-only open; an RFC 3501 server refuses state changes through that
+   session, so even a bug here cannot write.
+2. **The server's answer is checked.** If `EXAMINE` does not come back marked
+   `[READ-ONLY]`, the session is abandoned rather than continued.
+3. **Bodies are fetched with `BODY.PEEK[]`, never `BODY[]`.** Plain `BODY[]`
+   sets `\Seen` as a side effect. This is the single mistake that would
+   silently mark an inbox read, which is why the fetch is built in one place
+   and never taken from the caller.
+4. **Every command passes a deny list.** `STORE`, `APPEND`, `COPY`, `MOVE`,
+   `EXPUNGE`, `CREATE`, `DELETE`, `RENAME` — and `SELECT` — throw before a
+   byte reaches the socket.
+
+Nothing is written to disk either, and no attachment is downloaded: only the
+first `MAIL_FETCH_BYTES` (64 KB) of each message is fetched, which is enough
+for the text and not enough for the payload.
+
+### Setting it up
+
+Copy `mail.env.example` to `mail.env` — it is gitignored — and fill in the
+host, user and password. Then, in one run:
+
+```sh
+node chat.mjs --mail-check
+```
+
+That settles the whole setup at once rather than a question at a time: it
+reports where the settings came from, connects, authenticates, lists the
+folder names as the server spells them, opens the inbox read-only, searches a
+small window, decodes exactly **one** real message, and shows it exactly as
+the model would receive it. It then prints every IMAP command it sent, so you
+can see for yourself that none of them can change anything, and writes the lot
+to `copilot-cli-mailcheck.txt`.
+
+### Two things to know before you point it at real mail
+
+**The mail goes into the chat.** That is the feature — the text is pasted into
+the Copilot conversation so the model can work from it — but it does mean the
+contents leave your machine the same way any prompt does. `MAIL_REDACT` (on by
+default) strips JWTs, AWS and GitHub and Slack tokens, private keys and
+`password: …` lines on the way past, and the size caps keep a busy inbox from
+being sent wholesale.
+
+**A corporate mailbox may not allow this at all.** Microsoft 365 turned basic
+IMAP authentication off by default in 2023, so a work account will usually
+refuse a password and need `MAIL_OAUTH_TOKEN` instead. `--mail-check` says so
+plainly when the server advertises `LOGINDISABLED`, rather than failing
+obscurely.
+
+### Settings
+
+All of these live in `mail.env`, and a real environment variable overrides the
+file.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `MAIL_HOST` / `MAIL_PORT` / `MAIL_TLS` | — / 993 / on | The server. |
+| `MAIL_USER` | — | Usually the full address. |
+| `MAIL_PASS` | — | Password, or an app-specific one. |
+| `MAIL_OAUTH_TOKEN` | — | XOAUTH2 token, instead of a password. |
+| `MAIL_FOLDER` | `INBOX` | Default folder; `<copilot:mailboxes/>` lists the real names. |
+| `MAIL_DAYS` / `MAIL_LIMIT` | 7 / 25 | Default window and message cap. |
+| `MAIL_MAX_BODY` / `MAIL_MAX_TOTAL` | 2000 / 40000 | Characters per message, and in total. |
+| `MAIL_FETCH_BYTES` | 65536 | How much of each message is downloaded at all. |
+| `MAIL_REDACT` | on | Strip secrets before sending. `0` disables. |
 
 ## When an answer still comes out wrong
 

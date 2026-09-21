@@ -24,12 +24,13 @@ import fs from 'node:fs';
 
 // Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
 // a previous build is otherwise indistinguishable from a fresh one.
-const VERSION = '2026-09-21.10';
+const VERSION = '2026-09-21.11';
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 import { askInPage } from './page-fn.mjs';
-import { createAgentSession, runAgent } from './lib-agent.mjs';
+import { createAgentSession, runAgent, defaultTools } from './lib-agent.mjs';
 import { resolveRoot, ToolError } from './lib-fstools.mjs';
+import { loadMailConfig, configComplaint, mailTools, readMail, listFolders } from './lib-mailtool.mjs';
 
 const CONFIG = {
   host: process.env.CDP_HOST || '127.0.0.1',
@@ -96,6 +97,15 @@ Everything is confined to the workspace root (the current directory unless
 --root says otherwise); paths outside it are refused, symlinks are not
 followed, and nothing is ever executed. Writes and edits ask first, unless
 --yes. Reads and listings do not ask.
+
+With mail.env set up, the agent also gets a read-only view of your mail:
+
+  node chat.mjs --mail-check          check the setup, one run, changes nothing
+  node chat.mjs --agent "summarise anything from the last 10 days that needs a reply"
+
+Mail is opened with EXAMINE and fetched with BODY.PEEK, so nothing is marked
+as read and nothing on the server changes. Copy mail.env.example to mail.env
+to configure it, or point --mail-env at another file.
 
 Every turn writes copilot-cli-lastturn.txt (small, pasteable) and
 copilot-cli-capture.json (the conversation region). If an answer comes out
@@ -249,8 +259,19 @@ function approver({ yes, question }) {
   };
 }
 
+/**
+ * The tools this run offers. Mail joins the set only when it is configured:
+ * advertising a tool that cannot work teaches the model to keep trying it,
+ * and its failures would fill the conversation.
+ */
+function toolsetFor(root, mailEnv) {
+  const cfg = loadMailConfig({ root, envPath: mailEnv });
+  if (!cfg.configured) return { tools: defaultTools, mail: cfg };
+  return { tools: { ...defaultTools, ...mailTools(cfg) }, mail: cfg };
+}
+
 /** Run one agent task to completion over an already-attached page. */
-async function runAgentTask(cdp, task, { root, yes, question, session }) {
+async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv }) {
   let sess = session;
   if (!sess) {
     try {
@@ -262,16 +283,97 @@ async function runAgentTask(cdp, task, { root, yes, question, session }) {
   }
   note(`[agent] workspace: ${sess.root}`);
 
+  const { tools, mail } = toolsetFor(sess.root, mailEnv);
+  if (mail.configured) note(`[agent] mail: ${mail.user} at ${mail.host} (read-only)`);
+
   const res = await runAgent({
     ask: (prompt) => askPage(cdp, prompt),
     task,
     session: sess,
     approve: approver({ yes, question }),
     ui: agentUI(),
+    tools,
   });
   if (res.done) note(`[agent] done in ${res.steps} step${res.steps === 1 ? '' : 's'}.`);
   else note(`[agent] stopped after ${res.steps} steps — ${res.stalled}.`);
   return !!res.done;
+}
+
+// ------------------------------------------------------------------- mail
+
+/**
+ * Everything about the mail setup, in one run.
+ *
+ * It exists so that setting this up costs one round trip rather than a series
+ * of them: it settles reachability, authentication, folder naming, the
+ * read-only open, the search window and the decoding of a real message in a
+ * single command, and writes the lot to a file that can be pasted back. It
+ * touches a live mailbox, so it reads exactly one message and prints every
+ * IMAP command it sent, which is the evidence that nothing was mutated.
+ */
+async function runMailCheck(args) {
+  const mailEnv = takeFlag(args, '--mail-env');
+  const rootArg = takeFlag(args, '--root');
+  const days = Number(takeFlag(args, '--days') || 3);
+  const root = rootArg || LOCAL.cwd;
+  const cfg = loadMailConfig({ root, envPath: mailEnv });
+
+  const lines = [];
+  const say = (t = '') => { lines.push(t); note(t); };
+
+  say(`copilot-cli ${VERSION} — mail check`);
+  say(`settings from: ${cfg.source || '(no mail.env found; using the environment)'}`);
+  say(`host: ${cfg.host || '(unset)'}:${cfg.port} tls=${cfg.useTls ? 'on' : 'off'}`);
+  say(`user: ${cfg.user || '(unset)'}  auth: ${cfg.oauthToken ? 'OAuth token' : cfg.pass ? 'password' : '(none)'}`);
+  say(`redaction: ${cfg.redact ? 'on' : 'OFF'}`);
+  say('');
+
+  const complaint = configComplaint(cfg);
+  if (complaint) {
+    say(complaint);
+    say('');
+    say('mail.env takes lines like:');
+    say('  MAIL_HOST=imap.example.com');
+    say('  MAIL_USER=you@example.com');
+    say('  MAIL_PASS=an-app-password');
+    return false;
+  }
+
+  let ok = true;
+  let commands = [];
+  try {
+    say(`folders on the server:`);
+    const names = await listFolders(cfg);
+    for (const n of names.split('\n')) say(`  ${n}`);
+    say('');
+
+    say(`reading the last ${days} day(s) of ${cfg.folder}, one message only...`);
+    const res = await readMail({ ...cfg, limit: 1, totalChars: 4000, perMessageChars: 1200 }, { days, limit: 1 });
+    commands = res.commands;
+    say('');
+    say('--- what the model would be given ---');
+    say(res.text);
+    say('--- end ---');
+  } catch (e) {
+    ok = false;
+    say(`FAILED: ${e.message}`);
+  }
+
+  say('');
+  say('every IMAP command this run sent:');
+  for (const c of commands) say(`  ${c.replace(/^(LOGIN\s+\S+\s+).*$/i, '$1"[redacted]"')}`);
+  const mutating = commands.filter((c) => /^(SELECT|STORE|APPEND|COPY|MOVE|EXPUNGE|CREATE|DELETE|RENAME|UID (STORE|COPY|MOVE))\b/i.test(c));
+  say(mutating.length
+    ? `WARNING: ${mutating.length} command(s) could have changed the server — this is a bug, please report it`
+    : 'none of them can change anything on the server: no SELECT, no STORE, no flags, no deletes.');
+
+  try {
+    fs.writeFileSync('copilot-cli-mailcheck.txt', lines.join('\n') + '\n');
+    note('');
+    note('[mail] written to copilot-cli-mailcheck.txt — that file is the whole report.');
+    note('[mail] it contains one real message; redact it before sharing if you need to.');
+  } catch { /* the report on screen is the important one */ }
+  return ok;
 }
 
 async function attach({ fatal = true } = {}) {
@@ -349,6 +451,13 @@ async function main() {
   const replayFile = takeFlag(args, '--replay');
   if (replayFile !== undefined) { process.exit((await runReplay(replayFile, args)) ? 0 : 2); }
 
+  // Mail setup needs no page at all, so it runs before attaching.
+  if (args.includes('--mail-check')) {
+    takeBool(args, '--mail-check');
+    process.exit((await runMailCheck(args)) ? 0 : 1);
+  }
+
+  const mailEnv = takeFlag(args, '--mail-env');
   const rootArg = takeFlag(args, '--root');
   const yes = takeBool(args, '--yes', '-y');
   const task = takeFlag(args, '--agent');
@@ -362,7 +471,7 @@ async function main() {
   // One shot: an agent task.
   if (task !== undefined) {
     if (!task.trim()) { note('usage: node chat.mjs --agent "the task" [--root dir] [--yes]'); process.exit(2); }
-    const okay = await runAgentTask(cdp, task, { root: rootArg, yes, question: askOnce() });
+    const okay = await runAgentTask(cdp, task, { root: rootArg, yes, question: askOnce(), mailEnv });
     cdp.close();
     process.exit(okay ? 0 : 1);
   }
@@ -399,7 +508,7 @@ async function main() {
           agentSession = createAgentSession(resolveRoot(rootArg || LOCAL.cwd));
         } catch (e) { note('[agent] ' + e.message); rl.prompt(); return; }
       }
-      await runAgentTask(cdp, task, { yes, question: ask, session: agentSession });
+      await runAgentTask(cdp, task, { yes, question: ask, session: agentSession, mailEnv });
       rl.prompt(); return;
     }
     if (q === '/replay' || q.startsWith('/replay ')) {

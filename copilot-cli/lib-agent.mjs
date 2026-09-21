@@ -30,7 +30,12 @@
 // Like clichat, the backend is stateful: the conversation lives in the tab, so
 // the instructions are sent once and each later turn carries only the results.
 
-import { tools, ToolError } from './lib-fstools.mjs';
+import { tools as fileTools, ToolError } from './lib-fstools.mjs';
+
+// The toolset is a parameter rather than a fixed import, because mail is
+// only offered when it has been configured — advertising a tool that will
+// always fail teaches the model to keep trying it.
+export const defaultTools = fileTools;
 
 const NS = 'copilot';
 // Anchored to the start of a line, and multiline, which is the rule the
@@ -58,7 +63,7 @@ export function countMentions(text) {
 
 // ---------------------------------------------------------------- protocol
 
-export function renderSystemPrompt(root) {
+export function renderSystemPrompt(root, tools = defaultTools) {
   const lines = [
     'You are a coding agent working in a checkout on the user\'s machine.',
     'You act by emitting tool tags, which a bridge outside this chat executes',
@@ -143,7 +148,7 @@ export function stripFences(text) {
 // that quotes this protocol, most obviously this very file. We take the FIRST
 // close, which is what the model is told to produce; the alternative (last
 // close) breaks two legitimate writes in one reply, which is far more common.
-export function parseToolTags(text) {
+export function parseToolTags(text, tools = defaultTools) {
   const src = stripFences(text);
   const calls = [];
   OPEN.lastIndex = 0;
@@ -217,6 +222,7 @@ export function createAgentSession(root) {
  */
 export async function runAgent({
   ask, task, session, maxSteps = 16, approve = async () => true, ui,
+  tools = defaultTools,
 }) {
   const ctx = { root: session.root };
 
@@ -224,7 +230,7 @@ export async function runAgent({
   // repeating them every task would pay for context the session already has.
   let prompt = session.primed
     ? task
-    : `${renderSystemPrompt(session.root)}\n\nTASK: ${task}`;
+    : `${renderSystemPrompt(session.root, tools)}\n\nTASK: ${task}`;
   session.primed = true;
 
   for (let step = 1; step <= maxSteps; step++) {
@@ -236,7 +242,7 @@ export async function runAgent({
     const prose = proseOf(reply);
     if (prose) ui.prose(prose);
 
-    const calls = parseToolTags(reply);
+    const calls = parseToolTags(reply, tools);
     // Tag-shaped text that was not in column one is passed over. Say so
     // whether or not anything else ran: silence here would leave the user
     // wondering why a file they were just told about never changed. Strict is
@@ -266,7 +272,7 @@ export async function runAgent({
       }
 
       try {
-        const output = tool.run(ctx, call.args, call.body);
+        const output = await tool.run(ctx, call.args, call.body);
         ui.toolOk(label, output);
         results.push({ name: call.name, ok: true, output });
       } catch (err) {
