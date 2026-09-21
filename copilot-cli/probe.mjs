@@ -92,37 +92,52 @@ async function main() {
     process.exit(1);
   }
 
-  const pages = tabs.filter((t) => t.type === 'page');
-  const target = pages.find((t) => (t.url || '').includes(MATCH)) || pages[0];
-  if (!target) {
+  // Probe every real page, not just one. Falling back to "the first tab"
+  // silently probed Chrome's own /json listing once and produced an empty
+  // report, which cost a whole round trip — so now nothing is guessed: if the
+  // match misses, every page is inventoried and the right one is in there.
+  const pages = tabs.filter((t) => t.type === 'page' && /^https?:/.test(t.url || ''));
+  if (!pages.length) {
     console.error(`No page tab found. Open ${MATCH} in the debugged Chrome and retry.`);
     process.exit(1);
   }
-  if (!target.url.includes(MATCH)) {
-    console.error(`Warning: no tab matched "${MATCH}"; probing the first tab instead: ${target.url}`);
+  const matched = pages.filter((t) => (t.url || '').includes(MATCH));
+  const targets = matched.length ? matched : pages;
+  if (!matched.length) {
+    console.error(`No tab matched "${MATCH}" — inventorying all ${pages.length} page tab(s) instead.`);
   }
-
-  const cdp = new CDP(target.webSocketDebuggerUrl);
-  await cdp.connect();
-  await cdp.send('Runtime.enable');
-  const report = await cdp.eval(pageInventory.toString());
 
   const out = [];
   out.push('===== COPILOT-CLI DOM PROBE =====');
   out.push(`when: ${new Date().toISOString()}`);
-  out.push(`url: ${report.url}`);
-  out.push(`title: ${report.title}`);
-  out.push(`viewport: ${report.viewport.w}x${report.viewport.h}`);
-  out.push(`counts: ${JSON.stringify(report.counts)}`);
-  const block = (name, arr) => {
-    out.push(`\n--- ${name} (${arr.length}) ---`);
-    arr.forEach((o, i) => out.push(`[${i}] ${JSON.stringify(o)}`));
-  };
-  block('INPUT CANDIDATES (lowest on screen first)', report.inputs);
-  block('SEND-BUTTON CANDIDATES', report.buttons);
-  block('LIVE / LIST REGIONS (answer streams here)', report.liveRegions);
-  block('REPEATED CONTAINERS (message lists)', report.containers);
-  block('LAST TEXT BLOCKS (recent turns)', report.lastBlocks);
+  out.push(`tabs probed: ${targets.length} of ${pages.length} (match "${MATCH}"${matched.length ? '' : ' — no match, so all'})`);
+
+  for (const target of targets) {
+    let report;
+    const cdp = new CDP(target.webSocketDebuggerUrl);
+    try {
+      await cdp.connect();
+      await cdp.send('Runtime.enable');
+      report = await cdp.eval(pageInventory.toString());
+    } catch (e) {
+      out.push(`\n########## TAB ${target.url}\n(could not probe: ${e.message})`);
+      continue;
+    } finally { try { cdp.ws?.close(); } catch { /* already gone */ } }
+
+    out.push(`\n########## TAB ${report.url}`);
+    out.push(`title: ${report.title}`);
+    out.push(`viewport: ${report.viewport.w}x${report.viewport.h}`);
+    out.push(`counts: ${JSON.stringify(report.counts)}`);
+    const block = (name, arr) => {
+      out.push(`\n--- ${name} (${arr.length}) ---`);
+      arr.forEach((o, i) => out.push(`[${i}] ${JSON.stringify(o)}`));
+    };
+    block('INPUT CANDIDATES (lowest on screen first)', report.inputs);
+    block('SEND-BUTTON CANDIDATES', report.buttons);
+    block('LIVE / LIST REGIONS (answer streams here)', report.liveRegions);
+    block('REPEATED CONTAINERS (message lists)', report.containers);
+    block('LAST TEXT BLOCKS (recent turns)', report.lastBlocks);
+  }
   out.push('\n===== END PROBE =====');
 
   const text = out.join('\n');
@@ -134,7 +149,8 @@ async function main() {
     console.log('\n(Report also saved to copilot-cli-probe.txt — cat it and paste the whole thing back.)');
   } catch { /* stdout is enough */ }
 
-  cdp.ws.close();
+  process.exit(0);
+
 }
 
 main().catch((e) => { console.error('probe failed:', e.message); process.exit(1); });
