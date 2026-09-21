@@ -24,10 +24,12 @@ import fs from 'node:fs';
 
 // Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
 // a previous build is otherwise indistinguishable from a fresh one.
-const VERSION = '2026-09-21.6';
+const VERSION = '2026-09-21.7';
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 import { askInPage } from './page-fn.mjs';
+import { createAgentSession, runAgent } from './lib-agent.mjs';
+import { resolveRoot, ToolError } from './lib-fstools.mjs';
 
 const CONFIG = {
   host: process.env.CDP_HOST || '127.0.0.1',
@@ -77,7 +79,20 @@ into the page for you:
 
 Commands:  /probe  re-inventory the page   |  /debug   last turn's diagnostics
            /config show settings           |  /replay re-extract the last turn
+           /agent  <task> — let it work on your files (see below)
            /help   this text               |  /quit
+
+Agent mode gives the chat three verbs it does not natively have — read, write
+and list files (plus edit for a targeted change) — by asking it to emit tagged
+blocks that this CLI executes. Ported from the clichat harness.
+
+  node chat.mjs --agent "add a --version flag to cli.js"
+  node chat.mjs --agent "..." --root ../myproject --yes
+
+Everything is confined to the workspace root (the current directory unless
+--root says otherwise); paths outside it are refused, symlinks are not
+followed, and nothing is ever executed. Writes and edits ask first, unless
+--yes. Reads and listings do not ask.
 
 Every turn writes copilot-cli-lastturn.txt (small, pasteable) and
 copilot-cli-capture.json (the conversation region). If an answer comes out
@@ -99,27 +114,19 @@ function readStdin() {
 }
 
 /**
- * One prompt: expand @references, send it, print the answer.
- * Returns false when nothing was sent or nothing came back.
+ * One round trip through the page: send exactly this text, return the answer.
+ *
+ * Nothing here expands @references. The agent loop sends file contents and
+ * result tags through this, and an "@" inside a file is not an attachment.
+ * Returns null when the turn produced no usable answer.
  */
-async function runTurn(cdp, raw, stdinText) {
-  const { prompt, attachments, warnings, error } = expandPrompt(raw, {
-    cwd: LOCAL.cwd, maxFileBytes: LOCAL.maxFileBytes, maxPromptChars: LOCAL.maxPromptChars,
-  });
-  for (const w of warnings) note(`[attach] ${w}`);
-  if (error) { note(`[attach] ${error}`); return false; }
-
-  const full = stdinText ? withStdin(prompt, stdinText, LOCAL.stdinLabel) : prompt;
-  for (const a of attachments) note(`[attach] ${a}`);
-  if (stdinText) note('[attach] stdin');
-  if (full.length !== raw.length) note(`[attach] sending ${full.length} chars`);
-
+async function askPage(cdp, full) {
   let res;
   try {
     res = await cdp.evalFn(askInPage, { ...CONFIG, prompt: full }, { timeoutMs: CONFIG.answerTimeoutMs + 8000 });
   } catch (e) {
     note('[bridge] turn failed: ' + e.message);
-    return false;
+    return null;
   }
   lastDebug = res.debug;
   // Two files: a small one that is pasteable, and the DOM capture that makes
@@ -143,13 +150,34 @@ async function runTurn(cdp, raw, stdinText) {
     note('[bridge] re-run it offline, as many times as you like: node chat.mjs --replay copilot-cli-capture.json');
     note('[bridge] if it is still wrong, that one file is the whole bug report — no second attempt needed.');
   }
-  if (!res.ok) { note('[bridge] could not locate the input box. Run node probe.mjs and share the report.'); return false; }
+  if (!res.ok) { note('[bridge] could not locate the input box. Run node probe.mjs and share the report.'); return null; }
   if (!res.text) {
     note('[bridge] sent, but extracted no answer text.');
     note('[bridge] node chat.mjs --replay copilot-cli-capture.json shows what was on the page and why each candidate lost.');
-    return false;
+    return null;
   }
-  out(res.text);
+  return res.text;
+}
+
+/**
+ * One prompt: expand @references, send it, print the answer.
+ * Returns false when nothing was sent or nothing came back.
+ */
+async function runTurn(cdp, raw, stdinText) {
+  const { prompt, attachments, warnings, error } = expandPrompt(raw, {
+    cwd: LOCAL.cwd, maxFileBytes: LOCAL.maxFileBytes, maxPromptChars: LOCAL.maxPromptChars,
+  });
+  for (const w of warnings) note(`[attach] ${w}`);
+  if (error) { note(`[attach] ${error}`); return false; }
+
+  const full = stdinText ? withStdin(prompt, stdinText, LOCAL.stdinLabel) : prompt;
+  for (const a of attachments) note(`[attach] ${a}`);
+  if (stdinText) note('[attach] stdin');
+  if (full.length !== raw.length) note(`[attach] sending ${full.length} chars`);
+
+  const text = await askPage(cdp, full);
+  if (text === null) return false;
+  out(text);
   return true;
 }
 
@@ -175,6 +203,71 @@ async function runReplay(file, args) {
   note('copilot-cli ' + VERSION + ' — replay of ' + file);
   out(report(res));
   return true;
+}
+
+// ------------------------------------------------------------------ agent
+
+// One line per event. The file contents the agent reads and writes are not
+// echoed: they went past once already as the thing being worked on, and a
+// terminal full of them hides the two lines that say what changed.
+function agentUI() {
+  return {
+    step: (n, max) => note(`\n[agent] step ${n}/${max}`),
+    prose: (t) => out(t),
+    toolOk: (label, output) => {
+      const lines = String(output || '').split('\n');
+      const brief = lines.length <= 8 && String(output).length <= 400;
+      note(`[agent] ${label}`);
+      if (brief && output) note(lines.map((l) => '        ' + l).join('\n'));
+      else note(`        → ${lines.length} lines`);
+    },
+    toolError: (label, msg) => note(`[agent] ${label} — FAILED: ${msg}`),
+    skipped: (label) => note(`[agent] ${label} — skipped`),
+  };
+}
+
+/**
+ * Ask before anything is written.
+ *
+ * The model is imitating a protocol it was never trained on, so a wrong path
+ * or a mangled body is an ordinary occurrence rather than an alarming one.
+ * `question` is supplied by the caller because the REPL already owns stdin and
+ * a second reader on it would fight the first.
+ */
+function approver({ yes, question }) {
+  if (yes) return async () => true;
+  if (!question) {
+    return async (label) => { note(`[agent] would ${label} — refused: no terminal to confirm at (pass --yes)`); return false; };
+  }
+  return async (label) => {
+    const a = (await question(`[agent] ${label} — allow? [y/N] `)).trim().toLowerCase();
+    return a === 'y' || a === 'yes';
+  };
+}
+
+/** Run one agent task to completion over an already-attached page. */
+async function runAgentTask(cdp, task, { root, yes, question, session }) {
+  let sess = session;
+  if (!sess) {
+    try {
+      sess = createAgentSession(resolveRoot(root || LOCAL.cwd));
+    } catch (e) {
+      note('[agent] ' + (e instanceof ToolError ? e.message : e.message));
+      return false;
+    }
+  }
+  note(`[agent] workspace: ${sess.root}`);
+
+  const res = await runAgent({
+    ask: (prompt) => askPage(cdp, prompt),
+    task,
+    session: sess,
+    approve: approver({ yes, question }),
+    ui: agentUI(),
+  });
+  if (res.done) note(`[agent] done in ${res.steps} step${res.steps === 1 ? '' : 's'}.`);
+  else note(`[agent] stopped after ${res.steps} steps — ${res.stalled}.`);
+  return !!res.done;
 }
 
 async function attach({ fatal = true } = {}) {
@@ -216,20 +309,59 @@ async function ensureAttached(cdp) {
   return next;
 }
 
+/** Removes `--name value` from args and returns the value, or undefined. */
+function takeFlag(args, name) {
+  const i = args.indexOf(name);
+  if (i === -1) return undefined;
+  const [value] = args.splice(i, 2).slice(1);
+  return value === undefined ? '' : value;
+}
+
+/** Removes a bare flag from args and says whether it was there. */
+function takeBool(args, ...names) {
+  let found = false;
+  for (const n of names) {
+    const i = args.indexOf(n);
+    if (i !== -1) { args.splice(i, 1); found = true; }
+  }
+  return found;
+}
+
+/** A one-off readline question, for a one-shot run that has no REPL. */
+function askOnce() {
+  if (!process.stdin.isTTY) return null;
+  return (text) => new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    rl.question(text, (a) => { rl.close(); resolve(a); });
+  });
+}
+
 async function main() {
   const args = process.argv.slice(2);
   if (args.includes('--version') || args.includes('-v')) { out(VERSION); return; }
   if (args.includes('--help') || args.includes('-h')) { out(HELP); return; }
 
   // Offline: re-run extraction against a capture from an earlier turn.
-  const ri = args.indexOf('--replay');
-  if (ri !== -1) { process.exit((await runReplay(args[ri + 1], args)) ? 0 : 2); }
+  const replayFile = takeFlag(args, '--replay');
+  if (replayFile !== undefined) { process.exit((await runReplay(replayFile, args)) ? 0 : 2); }
+
+  const rootArg = takeFlag(args, '--root');
+  const yes = takeBool(args, '--yes', '-y');
+  const task = takeFlag(args, '--agent');
 
   const argvPrompt = args.filter((a) => !a.startsWith('-')).join(' ').trim();
   const piped = !process.stdin.isTTY;
-  const stdinText = piped ? await readStdin() : '';
+  const stdinText = piped && task === undefined ? await readStdin() : '';
 
   let cdp = await attach();
+
+  // One shot: an agent task.
+  if (task !== undefined) {
+    if (!task.trim()) { note('usage: node chat.mjs --agent "the task" [--root dir] [--yes]'); process.exit(2); }
+    const okay = await runAgentTask(cdp, task, { root: rootArg, yes, question: askOnce() });
+    cdp.close();
+    process.exit(okay ? 0 : 1);
+  }
 
   // One shot: a prompt on the command line, or anything piped in.
   if (argvPrompt || stdinText.trim()) {
@@ -240,6 +372,10 @@ async function main() {
 
   note('Connected. Type a prompt, or /help. Attach files with @path.\n');
   const rl = readline.createInterface({ input: process.stdin, output: process.stderr, prompt: '> ' });
+  const ask = (text) => new Promise((resolve) => rl.question(text, resolve));
+  // One agent session for the life of the REPL, so "now do the same to the
+  // other handler" lands in a conversation that still remembers the files.
+  let agentSession = null;
   rl.prompt();
 
   rl.on('line', async (line) => {
@@ -249,6 +385,19 @@ async function main() {
     if (q === '/quit' || q === '/exit') { rl.close(); return; }
     if (q === '/help') { note(HELP); rl.prompt(); return; }
     if (q === '/config') { note(JSON.stringify({ ...CONFIG, ...LOCAL }, null, 2)); rl.prompt(); return; }
+    if (q === '/agent' || q.startsWith('/agent ')) {
+      const task = q.slice('/agent'.length).trim();
+      if (!task) { note('usage: /agent <what you want done>'); rl.prompt(); return; }
+      cdp = await ensureAttached(cdp);
+      if (!cdp) { rl.prompt(); return; }
+      if (!agentSession) {
+        try {
+          agentSession = createAgentSession(resolveRoot(rootArg || LOCAL.cwd));
+        } catch (e) { note('[agent] ' + e.message); rl.prompt(); return; }
+      }
+      await runAgentTask(cdp, task, { yes, question: ask, session: agentSession });
+      rl.prompt(); return;
+    }
     if (q === '/replay' || q.startsWith('/replay ')) {
       await runReplay((q.split(/\s+/)[1] || 'copilot-cli-capture.json'), []);
       rl.prompt(); return;

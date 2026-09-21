@@ -162,8 +162,65 @@ selector tweak, not a rewrite.
 | `probe-fn.mjs` | The page-side inventory, shared by both |
 | `page-fn.mjs` | The function evaluated in the tab: type, send, wait, extract |
 | `lib-files.mjs` | `@path` expansion into attachment blocks |
+| `lib-agent.mjs` | The agent loop and tool-tag protocol (ported from clichat) |
+| `lib-fstools.mjs` | read / write / list / edit, confined to one directory |
 | `lib-dom.mjs` | A hand-written DOM, so the page function runs with no browser |
 | `lib-replay.mjs` | Rebuilds a saved capture and re-runs extraction against it |
+
+## Agent mode
+
+The chat backend has no tool calling. Agent mode gives it some anyway: the
+model is asked to emit tagged blocks, this CLI executes them and feeds the
+results back as the next turn. Ported from the clichat harness, which solved
+the same problem against a different backend.
+
+```sh
+node chat.mjs --agent "add a --version flag to cli.js"
+node chat.mjs --agent "..." --root ../myproject --yes
+```
+
+or `/agent <task>` in the REPL, which keeps one conversation across tasks so
+a follow-up lands in a session that still remembers the files it read.
+
+Four verbs, described to the model in a sentence each rather than as JSON
+Schema:
+
+| Tag | Does |
+|---|---|
+| `<copilot:read path="..."/>` | read a file |
+| `<copilot:list path="..."/>` | list a directory |
+| `<copilot:write path="...">…</copilot:write>` | create or replace a file |
+| `<copilot:edit path="...">…</copilot:edit>` | a SEARCH/REPLACE block |
+
+The grammar is a tag with a **raw body**, not JSON, because the thing an agent
+mostly emits is the contents of a source file — and a model that was never
+trained to call tools is exactly the model that gets JSON string escaping
+wrong. Inside a raw body a newline is a newline.
+
+One thing differs from clichat, and it is forced by this backend: the answer
+is read out of a *rendered page*, so anything the model writes has been
+through a markdown renderer and an HTML sanitizer first. A bare tag is an
+unknown element, which is what a sanitizer drops, and prose-level markdown
+would reflow a file body and destroy its indentation. So the model is told to
+put every tag in a fenced code block — the one construct that survives
+rendering with its whitespace intact — and the parser strips fences before
+reading tags. It accepts unfenced tags too, since which of the two actually
+comes back is a property of the page.
+
+### What it is allowed to do
+
+Everything is confined to the workspace root: the current directory, or
+`--root`. Paths that resolve outside it are refused, including through a
+symlinked directory in the middle; a symlink at the leaf is refused rather
+than followed; files are opened with `O_NOFOLLOW`; and `/`, `/etc`, your home
+directory and friends are rejected as roots outright.
+
+**Nothing is ever executed.** There is no shell tool and there will not be
+one. The worst a confused reply can do is write a bad file inside the root.
+
+Writes and edits ask for confirmation first, unless `--yes`. Reads and
+listings do not ask. With no terminal to ask at, a write is refused rather
+than assumed.
 
 ## When an answer still comes out wrong
 
