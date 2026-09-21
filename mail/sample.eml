@@ -1,0 +1,24 @@
+From: Jane Doe <jane.doe@corp.example>
+To: You <you@corp.example>
+Cc: Ops List <ops@corp.example>
+Subject: Re: Q3 deploy window & the prod-api incident
+Date: Sun, 20 Sep 2026 13:02:11 +0000
+Message-ID: <abc123@corp.example>
+In-Reply-To: <zzz999@corp.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="OUTER"
+
+--OUTER
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Hi,</p><p>The deploy window is <b>Tuesday 02:00 UTC</b>.
+Logs are on <a href="https://wiki/x">the wiki</a>.</p>
+<p>Temp creds: password=hunter2seventeen and token AKIAIOSFODNN7EXAMPLE</p>
+<img src="cid:logo"></body></html>
+
+--OUTER
+Content-Type: text/plain; name="notes.txt"
+Content-Disposition: attachment; filename="notes.txt"
+
+rollback plan here
+--OUTER--

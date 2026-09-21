@@ -1,0 +1,16 @@
+{
+  "name": "mail-export",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "bin": { "mail-probe": "probe.js", "mail-export": "export-imap.js" },
+  "scripts": {
+    "probe": "node probe.js",
+    "export": "node export-imap.js"
+  },
+  "dependencies": {
+    "imapflow": "^1.0.171",
+    "mailparser": "^3.7.2",
+    "html-to-text": "^9.0.5"
+  }
+}
