@@ -298,7 +298,7 @@ export async function listFolders(cfg) {
       authMode: cfg.authMode, domain: cfg.domain,
     });
     const names = await ews.folders();
-    return names.length ? names.join('\n') : '(the server listed no folders)';
+    return { text: names.length ? names.join('\n') : '(the server listed no folders)', commands: ews.log };
   }
 
   const imap = new ImapReader(cfg);
@@ -306,10 +306,54 @@ export async function listFolders(cfg) {
     await imap.connect();
     await imap.login();
     const names = await imap.folders();
-    return names.length ? names.join('\n') : '(the server listed no folders)';
+    return { text: names.length ? names.join('\n') : '(the server listed no folders)', commands: imap.log };
   } finally {
     await imap.logout();
   }
+}
+
+/**
+ * Why did a search come back empty?
+ *
+ * "No mail in the last N days" and "the search worked but nothing could be
+ * read out of the answer" printed identically, and they need opposite fixes.
+ * This asks the server three questions in one connection — the window you
+ * wanted, a much wider one, and no date restriction at all — and reports both
+ * what the server said it matched and how many of those we managed to parse.
+ * One run then says whether the mailbox is quiet, the window is wrong, or the
+ * client is at fault.
+ */
+export async function probeEwsSearch(cfg, { days }) {
+  const ews = new EwsReader({
+    url: cfg.ewsUrl, user: cfg.user, pass: cfg.pass,
+    version: cfg.ewsVersion, insecureTls: cfg.insecureTls, timeoutMs: cfg.timeoutMs,
+    authMode: cfg.authMode, domain: cfg.domain,
+  });
+  const where = await ews.folderElement(cfg.folder);
+  const attempts = [
+    { label: `last ${days} day(s)`, since: new Date(Date.now() - days * 86400000) },
+    { label: 'last 30 days', since: new Date(Date.now() - 30 * 86400000) },
+    { label: 'no date restriction at all', since: null, noRestriction: true },
+  ];
+  const out = [];
+  for (const a of attempts) {
+    try {
+      const found = await ews.findItems({
+        folderElement: where, since: a.since, limit: 5, noRestriction: a.noRestriction,
+      });
+      out.push({
+        label: a.label,
+        since: a.since ? a.since.toISOString() : null,
+        matched: found.totalInView,
+        parsed: found.length,
+        newest: found[0] ? `${found[0].received}  ${found[0].subject || '(no subject)'}` : null,
+      });
+      if (found.length) break;      // answered; no need to widen further
+    } catch (e) {
+      out.push({ label: a.label, error: e.message });
+    }
+  }
+  return { attempts: out, commands: ews.log, folder: cfg.folder };
 }
 
 /**
@@ -342,7 +386,7 @@ export function mailTools(cfg) {
       usage: '<copilot:mailboxes/>',
       describe: () => 'list mail folders',
       mutates: false,
-      run: () => listFolders(cfg),
+      run: async () => (await listFolders(cfg)).text,
     },
   };
 }

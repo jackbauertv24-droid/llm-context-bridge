@@ -58,10 +58,18 @@ const unesc = (s) => String(s)
   .replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
   .replace(/&amp;/g, '&');
 
-/** Every <tag ...>inner</tag> block, as raw strings including the open tag. */
+/**
+ * Every <tag ...>inner</tag> block, as raw strings including the open tag.
+ *
+ * The attribute group is lazy. Greedy, it swallows the slash of a
+ * self-closing tag — <t:ItemId Id="..." ChangeKey="..."/> then looks like a
+ * container, the close tag is never found, and every message in the response
+ * is silently dropped. That bug produced an empty inbox from a mailbox with
+ * thousands of messages in it.
+ */
 function blocks(xml, local) {
   const out = [];
-  const re = new RegExp(`<(?:\\w+:)?${local}\\b([^>]*)(/)?>`, 'g');
+  const re = new RegExp(`<(?:\\w+:)?${local}\\b([^>]*?)\\s*(/)?>`, 'g');
   let m;
   while ((m = re.exec(xml))) {
     if (m[2]) { out.push({ attrs: m[1], inner: '' }); continue; }
@@ -70,7 +78,9 @@ function blocks(xml, local) {
     // Nested tags of the same name do not occur in these responses, so the
     // first close is the right one.
     const close = closeRe.exec(xml);
-    if (!close) break;
+    // An unterminated tag is skipped rather than ending the scan: one
+    // malformed element should not hide every element after it.
+    if (!close) continue;
     out.push({ attrs: m[1], inner: xml.slice(re.lastIndex, close.index) });
     re.lastIndex = close.index;
   }
@@ -344,13 +354,13 @@ export class EwsReader {
    * control; `from` and `subject` are matched here as well, but narrowing on
    * the server first is what keeps a busy mailbox from being paged through.
    */
-  async findItems({ folderElement, since, limit, unreadOnly, from, subject }) {
-    const conditions = [
+  async findItems({ folderElement, since, limit, unreadOnly, from, subject, noRestriction = false }) {
+    const conditions = since && !noRestriction ? [
       `<t:IsGreaterThanOrEqualTo>
          <t:FieldURI FieldURI="item:DateTimeReceived"/>
          <t:FieldURIOrConstant><t:Constant Value="${esc(ewsDate(since))}"/></t:FieldURIOrConstant>
        </t:IsGreaterThanOrEqualTo>`,
-    ];
+    ] : [];
     if (unreadOnly) {
       // A filter on the flag, not a change to it.
       conditions.push(`<t:IsEqualTo>
@@ -363,9 +373,9 @@ export class EwsReader {
          <t:FieldURI FieldURI="item:Subject"/><t:Constant Value="${esc(subject)}"/>
        </t:Contains>`);
     }
-    const restriction = conditions.length === 1
-      ? conditions[0]
-      : `<t:And>${conditions.join('')}</t:And>`;
+    const restriction = conditions.length === 0 ? ''
+      : conditions.length === 1 ? conditions[0]
+        : `<t:And>${conditions.join('')}</t:And>`;
 
     const xml = await this.call('FindItem', `<m:FindItem Traversal="Shallow">
       <m:ItemShape>
@@ -379,12 +389,18 @@ export class EwsReader {
         </t:AdditionalProperties>
       </m:ItemShape>
       <m:IndexedPageItemView MaxEntriesReturned="${Math.max(1, Math.min(limit, 200))}" Offset="0" BasePoint="Beginning"/>
-      <m:Restriction>${restriction}</m:Restriction>
+      ${restriction ? `<m:Restriction>${restriction}</m:Restriction>` : ''}
       <m:SortOrder>
         <t:FieldOrder Order="Descending"><t:FieldURI FieldURI="item:DateTimeReceived"/></t:FieldOrder>
       </m:SortOrder>
       <m:ParentFolderIds>${folderElement}</m:ParentFolderIds>
     </m:FindItem>`);
+
+    // What the server says it matched, straight from the response. If this
+    // disagrees with how many we parsed, the fault is here and not there.
+    const root = blocks(xml, 'RootFolder')[0];
+    const totalInView = root ? Number(attr(root.attrs, 'TotalItemsInView') || 0) : null;
+    const rawBlocks = blocks(xml, 'Message').length;
 
     const items = [];
     for (const msg of blocks(xml, 'Message')) {
@@ -405,6 +421,8 @@ export class EwsReader {
       if (from && !one.from.toLowerCase().includes(String(from).toLowerCase())) continue;
       items.push(one);
     }
+    items.totalInView = totalInView;
+    items.rawBlocks = rawBlocks;
     return items;
   }
 

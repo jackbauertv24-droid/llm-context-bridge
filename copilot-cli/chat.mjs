@@ -24,13 +24,13 @@ import fs from 'node:fs';
 
 // Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
 // a previous build is otherwise indistinguishable from a fresh one.
-const VERSION = '2026-09-21.15';
+const VERSION = '2026-09-21.16';
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 import { askInPage } from './page-fn.mjs';
 import { createAgentSession, runAgent, defaultTools } from './lib-agent.mjs';
 import { resolveRoot, ToolError } from './lib-fstools.mjs';
-import { loadMailConfig, configComplaint, mailTools, readMail, listFolders } from './lib-mailtool.mjs';
+import { loadMailConfig, configComplaint, mailTools, readMail, listFolders, probeEwsSearch } from './lib-mailtool.mjs';
 
 const CONFIG = {
   host: process.env.CDP_HOST || '127.0.0.1',
@@ -407,8 +407,9 @@ async function runMailCheck(args) {
   let gotMessage = false;
   try {
     say(`folders on the server:`);
-    const names = await listFolders(cfg);
-    for (const n of names.split('\n')) say(`  ${n}`);
+    const listed = await listFolders(cfg);
+    for (const n of listed.text.split('\n')) say(`  ${n}`);
+    commands = commands.concat(listed.commands);
     say('');
 
     say(`reading the last ${days} day(s) of ${cfg.folder}, one message only...`);
@@ -419,6 +420,36 @@ async function runMailCheck(args) {
     say(res.text);
     say('--- end ---');
     gotMessage = res.count > 0;
+
+    // Nothing found is a result that needs explaining, not reporting. Ask
+    // the server the same question three ways, in this same run, so the
+    // answer is not "try a bigger number and run it again".
+    if (!gotMessage && cfg.protocol === 'ews') {
+      say('');
+      say('nothing came back, so asking the server the same question three ways:');
+      const probe = await probeEwsSearch(cfg, { days });
+      commands = commands.concat(probe.commands);
+      for (const a of probe.attempts) {
+        if (a.error) { say(`  ${a.label}: failed — ${a.error}`); continue; }
+        say(`  ${a.label}: server matched ${a.matched === null ? '?' : a.matched}, `
+          + `this client parsed ${a.parsed}${a.since ? `  (since ${a.since})` : ''}`);
+        if (a.newest) say(`      newest: ${a.newest}`);
+      }
+      const any = probe.attempts.find((a) => (a.matched || 0) > 0 || a.parsed > 0);
+      const mismatch = probe.attempts.find((a) => (a.matched || 0) > 0 && a.parsed === 0);
+      say('');
+      if (mismatch) {
+        say(`  VERDICT: the server matched ${mismatch.matched} item(s) and this client read none of them.`);
+        say('  That is a bug here, not an empty mailbox. Send this report.');
+      } else if (!any) {
+        say(`  VERDICT: ${cfg.folder} really is empty as far as this account can see —`);
+        say('  not even an unrestricted search returned anything. Try another folder');
+        say('  from the list above with MAIL_FOLDER, or check the account is the right one.');
+      } else {
+        say('  VERDICT: the mailbox has older mail but nothing inside the window.');
+        say('  Widen it with MAIL_DAYS, or name a busier folder with MAIL_FOLDER.');
+      }
+    }
   } catch (e) {
     ok = false;
     say(`FAILED: ${e.message}`);
