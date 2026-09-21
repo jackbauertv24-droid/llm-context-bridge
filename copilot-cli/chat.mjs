@@ -24,7 +24,7 @@ import fs from 'node:fs';
 
 // Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
 // a previous build is otherwise indistinguishable from a fresh one.
-const VERSION = '2026-09-21.11';
+const VERSION = '2026-09-21.12';
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 import { askInPage } from './page-fn.mjs';
@@ -103,9 +103,10 @@ With mail.env set up, the agent also gets a read-only view of your mail:
   node chat.mjs --mail-check          check the setup, one run, changes nothing
   node chat.mjs --agent "summarise anything from the last 10 days that needs a reply"
 
-Mail is opened with EXAMINE and fetched with BODY.PEEK, so nothing is marked
-as read and nothing on the server changes. Copy mail.env.example to mail.env
-to configure it, or point --mail-env at another file.
+Reading is the only thing it can do: no sending, no replying, no moving, and
+the read flag is never set. Over Exchange it issues FindFolder, FindItem and
+GetItem and nothing else; over IMAP it uses EXAMINE and BODY.PEEK. Copy
+mail.env.example to mail.env to configure it, or point --mail-env elsewhere.
 
 Every turn writes copilot-cli-lastturn.txt (small, pasteable) and
 copilot-cli-capture.json (the conversation region). If an answer comes out
@@ -323,7 +324,14 @@ async function runMailCheck(args) {
 
   say(`copilot-cli ${VERSION} — mail check`);
   say(`settings from: ${cfg.source || '(no mail.env found; using the environment)'}`);
-  say(`host: ${cfg.host || '(unset)'}:${cfg.port} tls=${cfg.useTls ? 'on' : 'off'}`);
+  say(`protocol: ${cfg.protocol.toUpperCase()}`);
+  if (cfg.protocol === 'ews') {
+    say(`endpoint: ${cfg.ewsUrl || '(unset)'}`);
+    say(`declared server version: ${cfg.ewsVersion}`);
+    say(`tls verification: ${cfg.insecureTls ? 'OFF (MAIL_TLS_INSECURE=1)' : 'on'}`);
+  } else {
+    say(`host: ${cfg.host || '(unset)'}:${cfg.port} tls=${cfg.useTls ? 'on' : 'off'}`);
+  }
   say(`user: ${cfg.user || '(unset)'}  auth: ${cfg.oauthToken ? 'OAuth token' : cfg.pass ? 'password' : '(none)'}`);
   say(`redaction: ${cfg.redact ? 'on' : 'OFF'}`);
   say('');
@@ -333,9 +341,9 @@ async function runMailCheck(args) {
     say(complaint);
     say('');
     say('mail.env takes lines like:');
-    say('  MAIL_HOST=imap.example.com');
-    say('  MAIL_USER=you@example.com');
-    say('  MAIL_PASS=an-app-password');
+    say('  MAIL_EWS_URL=https://owa.example.com/EWS/Exchange.asmx');
+    say('  MAIL_USER=DOMAIN\\serviceaccount   (or the full address)');
+    say('  MAIL_PASS=the-password');
     return false;
   }
 
@@ -360,12 +368,15 @@ async function runMailCheck(args) {
   }
 
   say('');
-  say('every IMAP command this run sent:');
+  say(`every ${cfg.protocol.toUpperCase()} request this run sent:`);
   for (const c of commands) say(`  ${c.replace(/^(LOGIN\s+\S+\s+).*$/i, '$1"[redacted]"')}`);
-  const mutating = commands.filter((c) => /^(SELECT|STORE|APPEND|COPY|MOVE|EXPUNGE|CREATE|DELETE|RENAME|UID (STORE|COPY|MOVE))\b/i.test(c));
+  const MUTATORS = /^(SELECT|STORE|APPEND|COPY|MOVE|EXPUNGE|CREATE|DELETE|RENAME|UID (STORE|COPY|MOVE)|UpdateItem|CreateItem|SendItem|DeleteItem|MoveItem|CopyItem|MarkAllItemsAsRead)\b/i;
+  const mutating = commands.filter((c) => MUTATORS.test(c));
   say(mutating.length
-    ? `WARNING: ${mutating.length} command(s) could have changed the server — this is a bug, please report it`
-    : 'none of them can change anything on the server: no SELECT, no STORE, no flags, no deletes.');
+    ? `WARNING: ${mutating.length} request(s) could have changed the server — this is a bug, please report it`
+    : (cfg.protocol === 'ews'
+      ? 'all of them are reads: FindFolder, FindItem and GetItem only. No UpdateItem, so no read flag was set; no SendItem, so nothing was sent.'
+      : 'none of them can change anything on the server: no SELECT, no STORE, no flags, no deletes.'));
 
   try {
     fs.writeFileSync('copilot-cli-mailcheck.txt', lines.join('\n') + '\n');

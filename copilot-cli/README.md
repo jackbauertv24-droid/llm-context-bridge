@@ -166,7 +166,8 @@ selector tweak, not a rewrite.
 | `PORTING-BACK-TO-CLICHAT.md` | The fixes found here that clichat still needs |
 | `lib-fstools.mjs` | read / write / list / edit, confined to one directory |
 | `lib-mailtool.mjs` | the mail tools, their settings and redaction |
-| `lib-imap.mjs` | a read-only IMAP client, zero dependencies |
+| `lib-ews.mjs` | a read-only Exchange Web Services client, zero dependencies |
+| `lib-imap.mjs` | a read-only IMAP client, for servers that offer it |
 | `lib-mime.mjs` | turning a raw message into readable text |
 | `lib-dom.mjs` | A hand-written DOM, so the page function runs with no browser |
 | `lib-replay.mjs` | Rebuilds a saved capture and re-runs extraction against it |
@@ -305,44 +306,70 @@ node chat.mjs --agent "summarise anything from the last 10 days that needs a rep
 <copilot:mailboxes/>
 ```
 
-### It cannot change anything, including the read flag
+### Exchange, because that is what is actually reachable
 
-This is the constraint the feature was built around, so it is enforced four
-times over rather than trusted to care:
+The default protocol is **Exchange Web Services** against an on-premises
+server — the same `/EWS/Exchange.asmx` endpoint an Outlook client uses, with
+a username and password. That choice is not a guess: an existing production
+integration on the same network reaches its mailboxes exactly this way, and
+that environment has no IMAP, no Graph and no OAuth. Because the server is
+on-premises, Microsoft's 2023 removal of basic authentication — which applies
+to Office 365 in the cloud — does not apply to it.
 
-1. **The mailbox is opened with `EXAMINE`, never `SELECT`.** `EXAMINE` is the
-   read-only open; an RFC 3501 server refuses state changes through that
-   session, so even a bug here cannot write.
-2. **The server's answer is checked.** If `EXAMINE` does not come back marked
-   `[READ-ONLY]`, the session is abandoned rather than continued.
-3. **Bodies are fetched with `BODY.PEEK[]`, never `BODY[]`.** Plain `BODY[]`
-   sets `\Seen` as a side effect. This is the single mistake that would
-   silently mark an inbox read, which is why the fetch is built in one place
-   and never taken from the caller.
-4. **Every command passes a deny list.** `STORE`, `APPEND`, `COPY`, `MOVE`,
-   `EXPUNGE`, `CREATE`, `DELETE`, `RENAME` — and `SELECT` — throw before a
-   byte reaches the socket.
+IMAP is kept as an alternative for servers that offer it; set
+`MAIL_PROTOCOL=imap`.
 
-Nothing is written to disk either, and no attachment is downloaded: only the
-first `MAIL_FETCH_BYTES` (64 KB) of each message is fetched, which is enough
-for the text and not enough for the payload.
+### It cannot change anything, send anything, or mark anything read
+
+This is the constraint the feature was built around, so it is enforced in the
+code rather than left to care or configuration. There is no setting that
+turns it off.
+
+**Over EWS:**
+
+1. **Three operations exist.** `FindFolder`, `FindItem`, `GetItem`. All reads.
+2. **Everything else is refused before it is sent.** `UpdateItem`,
+   `CreateItem`, `SendItem`, `DeleteItem`, `MoveItem`, `CopyItem`,
+   `MarkAllItemsAsRead` and the rest throw rather than go out, so no later
+   edit can quietly add a write path.
+3. **The read flag is reported, never set.** In EWS a message becomes read
+   only through an explicit `UpdateItem` on `message:IsRead` — fetching an
+   item does not change it — and `UpdateItem` cannot be sent. `unread="true"`
+   filters on the flag; it does not touch it.
+4. **Nothing is sent.** There is no code path that composes a message. The
+   integration this borrowed its settings from both marks mail read and sends
+   replies; neither came across.
+
+**Over IMAP:** the mailbox is opened with `EXAMINE` and never `SELECT`; the
+server's `[READ-ONLY]` confirmation is checked and the session abandoned
+without it; bodies are fetched with `BODY.PEEK[]` and never `BODY[]`, which
+is the one mistake that would silently mark an inbox read; and `STORE`,
+`APPEND`, `COPY`, `MOVE`, `EXPUNGE` and friends hit the same deny list.
+
+Nothing is written to disk either, and no attachment is downloaded.
 
 ### Setting it up
 
 Copy `mail.env.example` to `mail.env` — it is gitignored — and fill in the
-host, user and password. Then, in one run:
+EWS URL, user and password. The username is often `DOMAIN\\username` rather
+than an address. Then, in one run:
 
 ```sh
 node chat.mjs --mail-check
 ```
 
 That settles the whole setup at once rather than a question at a time: it
-reports where the settings came from, connects, authenticates, lists the
-folder names as the server spells them, opens the inbox read-only, searches a
-small window, decodes exactly **one** real message, and shows it exactly as
-the model would receive it. It then prints every IMAP command it sent, so you
-can see for yourself that none of them can change anything, and writes the lot
-to `copilot-cli-mailcheck.txt`.
+reports where the settings came from and which protocol it will use, connects,
+authenticates, lists the folder names as the server spells them, searches a
+small window, fetches exactly **one** real message, and shows it exactly as
+the model would receive it. It then prints every request it sent — for EWS,
+the operation names — so you can see for yourself that all of them are reads,
+and writes the lot to `copilot-cli-mailcheck.txt`.
+
+A 401 is reported with what the server said it wants. If it offers only
+`Negotiate`/`NTLM` and not `Basic`, that is named plainly rather than failing
+obscurely: this client speaks Basic over HTTPS, which is what the existing
+integration on this network uses.
 
 ### Two things to know before you point it at real mail
 
@@ -353,11 +380,9 @@ default) strips JWTs, AWS and GitHub and Slack tokens, private keys and
 `password: …` lines on the way past, and the size caps keep a busy inbox from
 being sent wholesale.
 
-**A corporate mailbox may not allow this at all.** Microsoft 365 turned basic
-IMAP authentication off by default in 2023, so a work account will usually
-refuse a password and need `MAIL_OAUTH_TOKEN` instead. `--mail-check` says so
-plainly when the server advertises `LOGINDISABLED`, rather than failing
-obscurely.
+**Use an account that is meant for this.** The tool cannot change anything,
+but the credentials in `mail.env` are in a plain file on disk. A dedicated
+service mailbox is a better idea than your own.
 
 ### Settings
 
@@ -366,14 +391,18 @@ file.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `MAIL_HOST` / `MAIL_PORT` / `MAIL_TLS` | — / 993 / on | The server. |
+| `MAIL_PROTOCOL` | `ews` when a URL is set | `ews` or `imap`. |
+| `MAIL_EWS_URL` | — | e.g. `https://owa.example.com/EWS/Exchange.asmx`. |
+| `MAIL_EWS_VERSION` | `Exchange2010_SP2` | Declared to the server; the safe floor. |
+| `MAIL_TLS_INSECURE` | off | `1` skips certificate checking, for an internal CA. |
+| `MAIL_HOST` / `MAIL_PORT` / `MAIL_TLS` | — / 993 / on | The IMAP server, if used. |
 | `MAIL_USER` | — | Usually the full address. |
 | `MAIL_PASS` | — | Password, or an app-specific one. |
 | `MAIL_OAUTH_TOKEN` | — | XOAUTH2 token, instead of a password. |
 | `MAIL_FOLDER` | `INBOX` | Default folder; `<copilot:mailboxes/>` lists the real names. |
 | `MAIL_DAYS` / `MAIL_LIMIT` | 7 / 25 | Default window and message cap. |
 | `MAIL_MAX_BODY` / `MAIL_MAX_TOTAL` | 2000 / 40000 | Characters per message, and in total. |
-| `MAIL_FETCH_BYTES` | 65536 | How much of each message is downloaded at all. |
+| `MAIL_FETCH_BYTES` | 65536 | IMAP only: how much of each message is downloaded. |
 | `MAIL_REDACT` | on | Strip secrets before sending. `0` disables. |
 
 ## When an answer still comes out wrong

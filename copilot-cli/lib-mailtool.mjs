@@ -11,9 +11,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ImapReader, MailError, imapDate } from './lib-imap.mjs';
+import { EwsReader, EwsError } from './lib-ews.mjs';
 import { parseMessage } from './lib-mime.mjs';
 
-export { MailError };
+export { MailError, EwsError };
 
 const DEFAULTS = {
   days: 7,
@@ -72,7 +73,16 @@ export function loadMailConfig({ root, envPath, env = process.env } = {}) {
   }
 
   const pick = (name) => (env[name] !== undefined && env[name] !== '' ? env[name] : fromFile[name]);
+  // Exchange Web Services is the default when a URL is given, because it is
+  // the method that works on the network this was built for: an on-premises
+  // Exchange with no IMAP and no OAuth.
+  const ewsUrl = pick('MAIL_EWS_URL');
+  const protocol = (pick('MAIL_PROTOCOL') || (ewsUrl ? 'ews' : 'imap')).toLowerCase();
   const cfg = {
+    protocol,
+    ewsUrl,
+    ewsVersion: pick('MAIL_EWS_VERSION') || 'Exchange2010_SP2',
+    insecureTls: String(pick('MAIL_TLS_INSECURE') ?? '0') === '1',
     host: pick('MAIL_HOST'),
     port: Number(pick('MAIL_PORT') || 993),
     useTls: String(pick('MAIL_TLS') ?? '1') !== '0',
@@ -89,18 +99,27 @@ export function loadMailConfig({ root, envPath, env = process.env } = {}) {
     timeoutMs: Number(pick('MAIL_TIMEOUT_MS') || 30000),
     source,
   };
-  cfg.configured = !!(cfg.host && cfg.user && (cfg.pass || cfg.oauthToken));
+  cfg.configured = cfg.protocol === 'ews'
+    ? !!(cfg.ewsUrl && cfg.user && cfg.pass)
+    : !!(cfg.host && cfg.user && (cfg.pass || cfg.oauthToken));
   return cfg;
 }
 
 /** What is missing, phrased as something a person can act on. */
 export function configComplaint(cfg) {
   const missing = [];
-  if (!cfg.host) missing.push('MAIL_HOST');
-  if (!cfg.user) missing.push('MAIL_USER');
-  if (!cfg.pass && !cfg.oauthToken) missing.push('MAIL_PASS (or MAIL_OAUTH_TOKEN)');
+  if (cfg.protocol === 'ews') {
+    if (!cfg.ewsUrl) missing.push('MAIL_EWS_URL');
+    if (!cfg.user) missing.push('MAIL_USER');
+    if (!cfg.pass) missing.push('MAIL_PASS');
+  } else {
+    if (!cfg.host) missing.push('MAIL_HOST');
+    if (!cfg.user) missing.push('MAIL_USER');
+    if (!cfg.pass && !cfg.oauthToken) missing.push('MAIL_PASS (or MAIL_OAUTH_TOKEN)');
+  }
   if (!missing.length) return null;
-  return `mail is not set up: ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not set. `
+  return `mail is not set up for ${cfg.protocol.toUpperCase()}: ${missing.join(', ')} `
+    + `${missing.length === 1 ? 'is' : 'are'} not set. `
     + 'Put them in mail.env next to the CLI (see README > Reading mail).';
 }
 
@@ -143,7 +162,7 @@ export function renderDigest(messages, { folder, days, truncatedAt, cfg }) {
   const lines = [
     `${messages.length} message${messages.length === 1 ? '' : 's'} in ${folder} `
     + `from the last ${days} day${days === 1 ? '' : 's'}, newest first.`,
-    'Opened read-only: nothing was marked as read and nothing on the server changed.',
+    'Read-only: nothing was marked as read and nothing on the server changed.',
     '',
   ];
   messages.forEach((m, i) => {
@@ -169,6 +188,47 @@ export function renderDigest(messages, { folder, days, truncatedAt, cfg }) {
 }
 
 /**
+ * Read recent mail over Exchange Web Services.
+ *
+ * Three read operations and nothing else. The read flag is reported, never
+ * set: in EWS that takes an explicit UpdateItem, which lib-ews.mjs refuses
+ * to send.
+ */
+async function readMailEws(cfg, { days, folder, limit, args }) {
+  const ews = new EwsReader({
+    url: cfg.ewsUrl, user: cfg.user, pass: cfg.pass,
+    version: cfg.ewsVersion, insecureTls: cfg.insecureTls, timeoutMs: cfg.timeoutMs,
+  });
+  const since = new Date(Date.now() - Math.max(0, days) * 86400000);
+  const where = await ews.folderElement(folder);
+  const found = await ews.findItems({
+    folderElement: where,
+    since,
+    limit,
+    unreadOnly: args.unread === 'true' || args.unread === '1',
+    from: args.from,
+    subject: args.subject,
+  });
+
+  const full = await ews.getItems(found.slice(0, limit));
+  const messages = [];
+  let spent = 0;
+  let truncatedAt = 0;
+  for (const m of full) {
+    const cost = Math.min((m.text || '').length, cfg.perMessageChars) + 200;
+    if (spent + cost > cfg.totalChars && messages.length) { truncatedAt = messages.length; break; }
+    spent += cost;
+    messages.push(m);
+  }
+  return {
+    text: renderDigest(messages, { folder, days, truncatedAt, cfg }),
+    count: messages.length,
+    folder,
+    commands: ews.log,
+  };
+}
+
+/**
  * Read recent mail. Opens read-only, peeks at bodies, changes nothing.
  */
 export async function readMail(cfg, args = {}) {
@@ -178,6 +238,8 @@ export async function readMail(cfg, args = {}) {
   const days = Math.max(0, Number(args.days ?? cfg.days) || cfg.days);
   const folder = args.folder || cfg.folder;
   const limit = Math.max(1, Math.min(Number(args.limit ?? cfg.limit) || cfg.limit, 200));
+
+  if (cfg.protocol === 'ews') return readMailEws(cfg, { days, folder, limit, args });
 
   const imap = new ImapReader(cfg);
   try {
@@ -224,6 +286,16 @@ export async function readMail(cfg, args = {}) {
 export async function listFolders(cfg) {
   const complaint = configComplaint(cfg);
   if (complaint) throw new MailError(complaint);
+
+  if (cfg.protocol === 'ews') {
+    const ews = new EwsReader({
+      url: cfg.ewsUrl, user: cfg.user, pass: cfg.pass,
+      version: cfg.ewsVersion, insecureTls: cfg.insecureTls, timeoutMs: cfg.timeoutMs,
+    });
+    const names = await ews.folders();
+    return names.length ? names.join('\n') : '(the server listed no folders)';
+  }
+
   const imap = new ImapReader(cfg);
   try {
     await imap.connect();
@@ -243,7 +315,7 @@ export async function listFolders(cfg) {
 export function mailTools(cfg) {
   return {
     mail: {
-      summary: 'read recent mail (read-only; never marks anything as read)',
+      summary: 'read recent mail (read-only; never marks anything as read, never sends)',
       usage: '<copilot:mail days="10" folder="INBOX" limit="25" from="" subject="" unread="false"/>',
       describe: (a) => {
         const bits = [`last ${a.days || cfg.days} days`];
