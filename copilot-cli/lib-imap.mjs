@@ -151,7 +151,11 @@ export class ImapReader {
       }
     }
     const tag = `A${String(++this.tag).padStart(4, '0')}`;
-    this.log.push(command);
+    // Redacted as it is recorded, not as it is printed. The log exists to be
+    // shown to someone, and a password that is only masked at the point of
+    // display is one refactor away from being shown.
+    this.log.push(command.replace(/^(LOGIN\s+\S+\s+).*$/i, '$1"[redacted]"')
+      .replace(/^(AUTHENTICATE\s+\S+).*$/i, '$1 [redacted]'));
     this.sock.write(`${tag} ${command}\r\n`);
 
     const untagged = [];
