@@ -28,9 +28,12 @@ const CONFIG = {
   host: process.env.CDP_HOST || '127.0.0.1',
   port: Number(process.env.CDP_PORT || 9222),
   match: process.env.TAB_MATCH || 'copilot.cloud.microsoft',
-  inputSelector: process.env.INPUT_SELECTOR || '',   // '' = auto-detect
-  sendSelector: process.env.SEND_SELECTOR || '',
-  answerSelector: process.env.ANSWER_SELECTOR || '',
+  // Defaults pinned from a real probe of copilot.cloud.microsoft (2026-09-21).
+  // Both fall back to auto-detection if they match nothing, so another chat UI
+  // still works; override either with the env var.
+  inputSelector: process.env.INPUT_SELECTOR || '#m365-chat-editor-target-element',
+  sendSelector: process.env.SEND_SELECTOR || '',   // Copilot has none until you type; Enter sends
+  answerSelector: process.env.ANSWER_SELECTOR || '[data-testid="markdown-reply"]',
   quietMs: Number(process.env.QUIET_MS || 1500),     // silence that means "done streaming"
   answerTimeoutMs: Number(process.env.ANSWER_TIMEOUT_MS || 120000),
 };
@@ -121,11 +124,16 @@ async function askInPage(cfg) {
   log(`text set, input now holds ${(input.value || input.innerText || '').length} chars`);
 
   const answerBlocks = () => {
-    if (cfg.answerSelector) return [...document.querySelectorAll(cfg.answerSelector)].filter(vis);
+    if (cfg.answerSelector) {
+      const pinned = [...document.querySelectorAll(cfg.answerSelector)].filter(vis);
+      if (pinned.length) return pinned;
+    }
     const sel = '[data-author-role="assistant"], [data-testid*="assistant" i], [class*="assistant" i], [class*="response" i], [role="listitem"]';
     return [...document.querySelectorAll(sel)].filter(vis);
   };
-  const baseCount = answerBlocks().length;
+  const baseBlocks = answerBlocks();
+  const baseSet = new Set(baseBlocks);
+  const baseCount = baseBlocks.length;
 
   // 4. Watch what the page adds. Tracking the actual added nodes is what makes
   // extraction independent of the page's class names: the answer is the
@@ -169,7 +177,12 @@ async function askInPage(cfg) {
     const t0 = Date.now();
     const iv = setInterval(() => {
       const stop = document.querySelector('button[aria-label*="stop" i], button[title*="stop" i], [data-testid*="stop" i]');
-      const grew = answerBlocks().length > baseCount || document.body.innerText.length > bodyBaseLen + 5;
+      // 'The page got 5 characters longer' was satisfied the moment our own
+      // prompt was echoed, so a quiet second while Copilot was still thinking
+      // counted as a finished answer. Require either a genuinely new answer
+      // block, or growth beyond the prompt we just added.
+      const newBlock = answerBlocks().some((el) => !baseSet.has(el));
+      const grew = newBlock || document.body.innerText.length > bodyBaseLen + cfg.prompt.length + 20;
       const quiet = Date.now() - lastMutation > cfg.quietMs;
       if ((quiet && !stop && grew) || Date.now() - t0 > cfg.answerTimeoutMs) {
         clearInterval(iv); resolve();
@@ -191,29 +204,43 @@ async function askInPage(cfg) {
   let text = '';
   let method = '';
 
-  // 7a. Preferred: the largest newly added block that is outside the composer
-  // and is not the echo of what we just sent.
-  const fresh = [...added].filter((el) => el.isConnected && el.nodeType === 1 && !(composer && composer.contains(el)) && !el.contains(input));
-  const useful = fresh.filter((el) => {
-    const t = norm(el.innerText || '');
-    return t.length > 0 && !(promptHead && t.includes(promptHead));
-  });
-  // Keep only outermost candidates, so we get the whole answer, not one paragraph.
-  const tops = useful.filter((el) => !useful.some((o) => o !== el && o.contains(el)));
-  tops.sort((a, b) => (b.innerText || '').length - (a.innerText || '').length);
-  debug.candidates = tops.slice(0, 5).map((el) => ({ path: pathOf(el), chars: (el.innerText || '').length }));
-
-  if (tops.length) {
-    text = clean(tops[0].innerText || '');
-    method = `added-node[largest] of ${tops.length} (${pathOf(tops[0])})`;
+  // 7a. An element matching the answer selector that was not there before we
+  // sent. This is the reliable path: the selector is a fact from the probe,
+  // everything below it is inference.
+  const afterBlocks = answerBlocks();
+  const freshBlocks = afterBlocks.filter((el) => !baseSet.has(el));
+  if (freshBlocks.length) {
+    text = clean(freshBlocks[freshBlocks.length - 1].innerText || '');
+    method = `answer-selector new block (${freshBlocks.length} new, ${pathOf(freshBlocks[freshBlocks.length - 1])})`;
+  } else if (cfg.answerSelector && afterBlocks.length > baseCount) {
+    text = clean(afterBlocks[afterBlocks.length - 1].innerText || '');
+    method = `answer-selector last block (count ${baseCount}->${afterBlocks.length})`;
   }
 
-  // 7b. Then the configured or guessed answer selector.
+  // 7b. Otherwise, the largest block the page added. A MutationObserver reports
+  // only the outermost node of an insertion, so when the page appends a whole
+  // turn — your message and the reply together — the one candidate it hands us
+  // contains our own prompt. Discarding it outright left nothing but the
+  // suggestion chips, which is exactly what got printed as an "answer". So
+  // descend into such a container instead of dropping it.
   if (!text) {
-    const blocks = answerBlocks();
-    if (blocks.length > baseCount || (blocks.length && cfg.answerSelector)) {
-      text = clean(blocks[blocks.length - 1].innerText || '');
-      method = `answer-block[last] (count ${baseCount}->${blocks.length})`;
+    const answerParts = (el, depth = 0) => {
+      const t = norm(el.innerText || '');
+      if (!t) return [];
+      if (depth < 6 && promptHead && t.includes(promptHead)) {
+        return [...el.children].flatMap((c) => answerParts(c, depth + 1));
+      }
+      return [el];
+    };
+    const fresh = [...added].filter((el) => el.isConnected && el.nodeType === 1
+      && !(composer && composer.contains(el)) && !el.contains(input));
+    const useful = fresh.flatMap((el) => answerParts(el));
+    const tops = useful.filter((el) => !useful.some((o) => o !== el && o.contains(el)));
+    tops.sort((a, b) => (b.innerText || '').length - (a.innerText || '').length);
+    debug.candidates = tops.slice(0, 5).map((el) => ({ path: pathOf(el), chars: (el.innerText || '').length }));
+    if (tops.length) {
+      text = clean(tops[0].innerText || '');
+      method = `added-node[largest] of ${tops.length} (${pathOf(tops[0])})`;
     }
   }
 
@@ -222,14 +249,16 @@ async function askInPage(cfg) {
   // eating the start of the answer.
   if (!text) {
     const suffix = document.body.innerText.slice(bodyBaseLen);
-    const at = promptHead ? norm(suffix).indexOf(promptHead) : -1;
-    let cut = suffix;
-    if (at !== -1) {
-      const idx = suffix.indexOf(cfg.prompt.slice(0, 20));
-      if (idx !== -1) cut = suffix.slice(idx + cfg.prompt.length);
-    }
+    const idx = suffix.indexOf(cfg.prompt.slice(0, 20));
+    const cut = idx !== -1 ? suffix.slice(idx + cfg.prompt.length) : suffix;
     text = clean(cut);
     method = 'body-innerText suffix (heuristic; pin ANSWER_SELECTOR from debug.candidates)';
+  }
+
+  // A turn that added no answer block at all almost always means the send did
+  // not take, which is a different problem from a bad selector — say which.
+  if (afterBlocks.length === baseCount && !freshBlocks.length) {
+    log(`WARNING: no new answer block appeared (still ${baseCount}); the send may not have registered`);
   }
 
   log(`extracted via ${method}, ${text.length} chars`);

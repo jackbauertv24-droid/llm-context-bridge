@@ -110,6 +110,13 @@ heuristics. If a turn misbehaves, the diagnostics tell you which step:
 - `[bridge] sent, but extracted no answer text` — the send worked; the answer
   selector needs pinning.
 
+Defaults are already pinned from a live probe of copilot.cloud.microsoft:
+`#m365-chat-editor-target-element` for the input and
+`[data-testid="markdown-reply"]` for the answer. Copilot has no send button
+until you type, so Enter is the send path. Both selectors fall back to
+auto-detection if they match nothing, which is what keeps the tool usable
+against another chat UI.
+
 Pin any selector with an env var (values come from the probe report's `path`):
 ```
 INPUT_SELECTOR='textarea[aria-label="Ask Copilot"]' \
