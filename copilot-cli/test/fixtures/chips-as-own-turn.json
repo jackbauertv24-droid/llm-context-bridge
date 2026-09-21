@@ -1,0 +1,158 @@
+{
+ "note": "A turn where the suggestion chips arrived as their own turn container beside the reply — the shape that once got printed as the answer. Drop a real copilot-cli-capture.json in this directory the same way, with an expect block, and it becomes a regression test that never needs a live run again.",
+ "expect": {
+  "text": "I'm responding normally and the conversation context is intact.\nEverything looks fine on my side.\nFeel free to throw a more interesting test at me.",
+  "excludes": [
+   "Can you tell me a fun fact?",
+   "What’s the meaning of life?",
+   "Show me a random joke"
+  ],
+  "method": "answer-selector"
+ },
+ "region": "body > div[MessageListContainer]",
+ "listPath": [
+  0
+ ],
+ "prompt": "are you ok?",
+ "selectors": {
+  "input": "#m365-chat-editor-target-element",
+  "send": "",
+  "answer": "[data-testid=\"markdown-reply\"]"
+ },
+ "input": {
+  "tag": "span",
+  "id": "m365-chat-editor-target-element",
+  "role": "textbox",
+  "label": "Message Copilot",
+  "contenteditable": "true"
+ },
+ "winnerPath": "div[MessageListContainer] > div[feed] > div#chatMessageResponse-new[copilot-message-div] > div[markdown-reply]",
+ "addedTops": [
+  1,
+  2,
+  3
+ ],
+ "tree": {
+  "tag": "div",
+  "testid": "MessageListContainer",
+  "chars": 260,
+  "children": [
+   {
+    "tag": "div",
+    "role": "feed",
+    "label": "Chat conversation",
+    "chars": 260,
+    "children": [
+     {
+      "tag": "div",
+      "id": "chatMessageResponse-old",
+      "testid": "copilot-message-div",
+      "chars": 22,
+      "children": [
+       {
+        "tag": "div",
+        "testid": "markdown-reply",
+        "chars": 22,
+        "children": [
+         {
+          "tag": "div",
+          "chars": 22,
+          "children": [
+           {
+            "tag": "p",
+            "chars": 22,
+            "text": "Hi! How can I help? 👋"
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "tag": "div",
+      "id": "chatMessageUser-1",
+      "testid": "copilot-message-div",
+      "chars": 11,
+      "children": [
+       {
+        "tag": "div",
+        "chars": 11,
+        "text": "are you ok?"
+       }
+      ]
+     },
+     {
+      "tag": "div",
+      "id": "chatMessageResponse-new",
+      "testid": "copilot-message-div",
+      "chars": 147,
+      "children": [
+       {
+        "tag": "div",
+        "testid": "markdown-reply",
+        "chars": 147,
+        "children": [
+         {
+          "tag": "div",
+          "chars": 147,
+          "children": [
+           {
+            "tag": "p",
+            "chars": 63,
+            "text": "I'm responding normally and the conversation context is intact."
+           },
+           {
+            "tag": "p",
+            "chars": 33,
+            "text": "Everything looks fine on my side."
+           },
+           {
+            "tag": "p",
+            "chars": 49,
+            "text": "Feel free to throw a more interesting test at me."
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "tag": "div",
+      "id": "chatMessageResponse-suggestions",
+      "testid": "copilot-message-div",
+      "chars": 77,
+      "children": [
+       {
+        "tag": "div",
+        "chars": 77,
+        "children": [
+         {
+          "tag": "button",
+          "testid": "chat-suggestion",
+          "chars": 27,
+          "text": "Can you tell me a fun fact?"
+         },
+         {
+          "tag": "button",
+          "testid": "chat-suggestion",
+          "chars": 27,
+          "text": "What’s the meaning of life?"
+         },
+         {
+          "tag": "button",
+          "testid": "chat-suggestion",
+          "chars": 21,
+          "text": "Show me a random joke"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "method": "answer-selector/new (score 5147, div[MessageListContainer] > div[feed] > div#chatMessageResponse-new[copilot-message-div] > div[markdown-reply])"
+}

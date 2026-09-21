@@ -232,27 +232,67 @@ export async function askInPage(cfg) {
     log(`WARNING: no new answer block appeared (still ${baseCount}); the send may not have registered`);
   }
 
-  // A structured dump of the conversation region, so that if the wrong thing
-  // was picked it can be diagnosed and fixed from this file alone, with no
-  // further manual run.
+  // A structured dump of the conversation region, rich enough that
+  // lib-replay.mjs can rebuild it offline and re-run this very function
+  // against it. A wrong answer is therefore diagnosed, fixed and regression
+  // tested from this file alone, with no further manual run.
+  const LIMITS = { depth: 9, kids: 40, text: 4000 };
   const snapshot = (el, depth = 0) => {
-    const kids = depth < 7 ? [...el.children].slice(0, 25) : [];
-    return {
+    const all = [...el.children];
+    const kids = depth < LIMITS.depth ? all.slice(0, LIMITS.kids) : [];
+    const own = el.innerText || '';
+    const node = {
       tag: el.tagName.toLowerCase(),
       id: el.id || undefined,
+      cls: el.getAttribute('class') || undefined,
       testid: el.getAttribute('data-testid') || undefined,
       role: el.getAttribute('role') || undefined,
       label: el.getAttribute('aria-label') || undefined,
-      chars: (el.innerText || '').length,
-      text: kids.length ? undefined : (el.innerText || '').slice(0, 400),
-      children: kids.length ? kids.map((c) => snapshot(c, depth + 1)) : undefined,
+      chars: own.length,
     };
+    if (kids.length) {
+      node.children = kids.map((c) => snapshot(c, depth + 1));
+      if (all.length > kids.length) node.clipped = all.length - kids.length;
+    } else {
+      node.text = own.slice(0, LIMITS.text);
+      if (own.length > LIMITS.text) node.clipped = own.length - LIMITS.text;
+      if (all.length) node.clippedDepth = all.length;
+    }
+    return node;
   };
+  const describe = (el) => (el ? {
+    tag: el.tagName.toLowerCase(),
+    id: el.id || undefined,
+    cls: el.getAttribute('class') || undefined,
+    testid: el.getAttribute('data-testid') || undefined,
+    role: el.getAttribute('role') || undefined,
+    label: el.getAttribute('aria-label') || undefined,
+    contenteditable: el.getAttribute('contenteditable') || undefined,
+  } : undefined);
   try {
     const region = document.querySelector('[data-testid="MessageListContainer"], [role="feed"]')
       || (winner && winner.el && winner.el.closest('[id*="message" i], [class*="message" i]'))
       || document.body;
-    debug.capture = { region: pathOf(region), tree: snapshot(region) };
+    // The turns usually sit one or two wrappers below the region; index the
+    // level that actually holds them, so a replay can rebuild the page as it
+    // stood before this exchange rather than as an empty feed.
+    let list = region;
+    const listPath = [];
+    while (list.children.length === 1 && list.children[0].children.length) { listPath.push(0); list = list.children[0]; }
+    debug.capture = {
+      region: pathOf(region),
+      listPath,
+      prompt: cfg.prompt,
+      selectors: { input: cfg.inputSelector, send: cfg.sendSelector, answer: cfg.answerSelector },
+      input: describe(input),
+      winnerPath: winner ? winner.path : null,
+      // Which of the region's top-level turns the page added for this
+      // exchange, so a replay appends exactly those and nothing else.
+      addedTops: [...list.children]
+        .map((c, i) => (fresh.some((f) => c === f || c.contains(f) || f.contains(c)) ? i : -1))
+        .filter((i) => i >= 0),
+      tree: snapshot(region),
+    };
   } catch (e) { debug.capture = { error: String(e && e.message) }; }
 
   log(`extracted via ${method}, ${text.length} chars`);

@@ -24,7 +24,7 @@ import fs from 'node:fs';
 
 // Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
 // a previous build is otherwise indistinguishable from a fresh one.
-const VERSION = '2026-09-21.4';
+const VERSION = '2026-09-21.5';
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 import { askInPage } from './page-fn.mjs';
@@ -75,8 +75,16 @@ into the page for you:
   @"my notes.md"       a path with spaces
   @src/                a directory listing
 
-Commands:  /probe  re-inventory the page   |  /debug  last turn's diagnostics
-           /config  show settings          |  /help   this text   |  /quit
+Commands:  /probe  re-inventory the page   |  /debug   last turn's diagnostics
+           /config show settings           |  /replay re-extract the last turn
+           /help   this text               |  /quit
+
+Every turn writes copilot-cli-lastturn.txt (small, pasteable) and
+copilot-cli-capture.json (the conversation region). If an answer comes out
+wrong, the capture can be re-run offline — no browser, no Copilot, no second
+manual attempt:
+
+  node chat.mjs --replay copilot-cli-capture.json
 
 Env: CDP_PORT CDP_HOST TAB_MATCH INPUT_SELECTOR SEND_SELECTOR ANSWER_SELECTOR
      QUIET_MS ANSWER_TIMEOUT_MS MAX_FILE_BYTES MAX_PROMPT_CHARS`;
@@ -132,11 +140,40 @@ async function runTurn(cdp, raw, stdinText) {
     || (res.method || '').startsWith('body-suffix');
   if (doubtful) {
     note('[bridge] this answer may be wrong — the best candidate looked like page furniture.');
-    note('[bridge] paste copilot-cli-lastturn.txt AND copilot-cli-capture.json; both together are enough to fix it with no further run.');
+    note('[bridge] re-run it offline, as many times as you like: node chat.mjs --replay copilot-cli-capture.json');
+    note('[bridge] if it is still wrong, that one file is the whole bug report — no second attempt needed.');
   }
   if (!res.ok) { note('[bridge] could not locate the input box. Run node probe.mjs and share the report.'); return false; }
-  if (!res.text) { note('[bridge] sent, but extracted no answer text. Run /debug — likely an ANSWER_SELECTOR tweak.'); return false; }
+  if (!res.text) {
+    note('[bridge] sent, but extracted no answer text.');
+    note('[bridge] node chat.mjs --replay copilot-cli-capture.json shows what was on the page and why each candidate lost.');
+    return false;
+  }
   out(res.text);
+  return true;
+}
+
+/**
+ * Re-run extraction against a saved capture. No CDP, no page: the whole
+ * point is that diagnosing a bad answer costs no further manual run.
+ */
+async function runReplay(file, args) {
+  if (!file) { note('usage: node chat.mjs --replay copilot-cli-capture.json [--prompt ...]'); return false; }
+  let capture;
+  try {
+    capture = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e) { note('could not read ' + file + ': ' + e.message); return false; }
+  // Accept either the capture itself or a whole lastturn-style wrapper.
+  if (!capture.tree && capture.debug && capture.debug.capture) capture = capture.debug.capture;
+  const pi = args.indexOf('--prompt');
+  const opts = pi !== -1 ? { prompt: args[pi + 1] } : {};
+  const { replay, report } = await import('./lib-replay.mjs');
+  let res;
+  try {
+    res = await replay(capture, opts);
+  } catch (e) { note('replay failed: ' + e.message); return false; }
+  note('copilot-cli ' + VERSION + ' — replay of ' + file);
+  out(report(res));
   return true;
 }
 
@@ -162,6 +199,10 @@ async function main() {
   if (args.includes('--version') || args.includes('-v')) { out(VERSION); return; }
   if (args.includes('--help') || args.includes('-h')) { out(HELP); return; }
 
+  // Offline: re-run extraction against a capture from an earlier turn.
+  const ri = args.indexOf('--replay');
+  if (ri !== -1) { process.exit((await runReplay(args[ri + 1], args)) ? 0 : 2); }
+
   const argvPrompt = args.filter((a) => !a.startsWith('-')).join(' ').trim();
   const piped = !process.stdin.isTTY;
   const stdinText = piped ? await readStdin() : '';
@@ -186,6 +227,10 @@ async function main() {
     if (q === '/quit' || q === '/exit') { rl.close(); return; }
     if (q === '/help') { note(HELP); rl.prompt(); return; }
     if (q === '/config') { note(JSON.stringify({ ...CONFIG, ...LOCAL }, null, 2)); rl.prompt(); return; }
+    if (q === '/replay' || q.startsWith('/replay ')) {
+      await runReplay((q.split(/\s+/)[1] || 'copilot-cli-capture.json'), []);
+      rl.prompt(); return;
+    }
     if (q === '/debug') { note(lastDebug ? JSON.stringify(lastDebug, null, 2) : '(no turn yet)'); rl.prompt(); return; }
     if (q === '/probe') {
       try {
