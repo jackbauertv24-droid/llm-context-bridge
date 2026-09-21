@@ -68,6 +68,18 @@ attachments listed but never written to disk, credential patterns redacted, and
 an offline self-test (`MAIL_SELFTEST=sample.eml`) so you can see the output shape
 without touching a real mailbox.
 
+## Can this be a browser extension instead?
+
+[`ext-probe/`](ext-probe/) is a minimal MV3 extension that answers whether
+unpacked sideloading is allowed on a managed machine, and whether admin policy
+still blocks host access to the domain you care about (`runtime_blocked_hosts`
+loads the extension fine and then forbids it from touching the site). It ships
+with a zero-dependency loopback echo server to test the local bridge transport.
+
+Note for anyone planning to intercept traffic from an extension: MV3 removed
+blocking `webRequest`, so an extension can redirect and block requests but
+**cannot rewrite request or response bodies**. Body rewriting needs a real proxy.
+
 ## The request protocol (optional)
 
 To let the model ask for data instead of only receiving it, put a file in the

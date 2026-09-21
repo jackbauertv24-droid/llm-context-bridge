@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Sideload Probe",
+  "version": "1.0.0",
+  "description": "Read-only diagnostic. Checks whether unpacked extensions load, how policy classifies them, whether a localhost bridge is reachable, and whether host access is blocked by admin policy.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Sideload Probe"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["storage", "scripting"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "optional_host_permissions": ["https://copilot.cloud.microsoft/*"]
+}

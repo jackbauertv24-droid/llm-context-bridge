@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Sideload Probe</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <h1>Sideload Probe</h1>
+    <p class="sub">Read-only. Nothing is sent anywhere except a loopback address you control.</p>
+    <ul id="results"></ul>
+    <div class="actions">
+      <button id="host-test">Test access to copilot.cloud.microsoft</button>
+      <p class="hint">
+        Requests an optional permission, then reads only
+        <code>document.title</code> of the active tab. Open a Copilot tab first.
+      </p>
+    </div>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>
