@@ -113,7 +113,35 @@ export async function askInPage(cfg) {
       el.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
     }
   };
+  // The page says when it is done: it shows a stop control while generating
+  // and removes it when it finishes. Watching for that is exact, where
+  // waiting for the page to fall silent is a guess -- and an expensive one,
+  // because the page keeps moving after the last word of the answer
+  // (suggestion chips, the copy and feedback toolbar, the "AI-generated
+  // content may be incorrect" footer) and each of those resets the silence.
+  //
+  // Visibility is checked, not just presence: a stop control left in the DOM
+  // but hidden would otherwise read as "still generating" until the timeout.
+  const stopSelector = cfg.stopSelector
+    || 'button[aria-label*="stop" i], button[title*="stop" i], [data-testid*="stop" i]';
+  const stopNow = () => {
+    try {
+      for (const el of document.querySelectorAll(stopSelector)) if (vis(el)) return el;
+    } catch { /* a malformed override must not break the turn */ }
+    return null;
+  };
+
+  const TICK = 100;
+  const wait = { via: 'timeout', sawStop: false, ms: 0, selector: stopSelector };
+  let goneFor = 0;
+
   fireEnter(input);
+  const sentAt = Date.now();
+  // Started here, not after the send check below: a short answer can be over
+  // within that 400ms, and a signal we were not yet watching for is no signal.
+  const watchStop = setInterval(() => {
+    if (stopNow()) { wait.sawStop = true; goneFor = 0; } else { goneFor += TICK; }
+  }, TICK);
   await sleep(400);
   const stillHasText = (input.value || input.innerText || '').includes(cfg.prompt.slice(0, 20));
   if (stillHasText) {
@@ -130,23 +158,43 @@ export async function askInPage(cfg) {
     log('sent via Enter');
   }
 
-  // 6. wait for streaming to settle
+  // 6. wait for the answer to be finished
   await new Promise((resolve) => {
-    const t0 = Date.now();
     const iv = setInterval(() => {
-      const stop = document.querySelector('button[aria-label*="stop" i], button[title*="stop" i], [data-testid*="stop" i]');
       // 'The page got 5 characters longer' was satisfied the moment our own
       // prompt was echoed, so a quiet second while Copilot was still thinking
       // counted as a finished answer. Require either a genuinely new answer
       // block, or growth beyond the prompt we just added.
       const newBlock = answerBlocks().some((el) => !baseSet.has(el));
       const grew = newBlock || document.body.innerText.length > bodyBaseLen + cfg.prompt.length + 20;
-      const quiet = Date.now() - lastMutation > cfg.quietMs;
-      if ((quiet && !stop && grew) || Date.now() - t0 > cfg.answerTimeoutMs) {
+
+      // The exact signal: we watched it generate, and it has stopped. Two
+      // consecutive absences, so a re-render that briefly drops the control
+      // does not end the turn early.
+      const finished = wait.sawStop && goneFor >= TICK * 2;
+      // The fallback, for a page that never showed a stop control at all.
+      const quiet = !wait.sawStop && Date.now() - lastMutation > cfg.quietMs;
+      // And a safety net: a stop control that is still there long after the
+      // page stopped changing is stale, not generating. Without this the turn
+      // would sit until the answer timeout -- two minutes for a page that
+      // finished seconds ago.
+      const stale = wait.sawStop && Date.now() - lastMutation > cfg.quietMs * 3;
+
+      if (grew && (finished || quiet || stale)) {
+        wait.via = finished ? 'stop-control-gone' : stale ? 'stale-stop-control' : 'quiet';
+        wait.ms = Date.now() - sentAt;
+        clearInterval(iv); resolve();
+        return;
+      }
+      if (Date.now() - sentAt > cfg.answerTimeoutMs) {
+        wait.ms = Date.now() - sentAt;
         clearInterval(iv); resolve();
       }
-    }, 250);
+    }, TICK);
   });
+  clearInterval(watchStop);
+  debug.wait = wait;
+  log(`waited ${wait.ms}ms, ended via ${wait.via}${wait.sawStop ? '' : ' (no stop control was ever visible)'}`);
   obs.disconnect();
 
   // 7. extract. Page furniture that rides along with the answer region.

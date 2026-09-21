@@ -124,8 +124,9 @@ node chat.mjs
 ```
 
 Other env vars: `CDP_PORT` (9222), `CDP_HOST` (127.0.0.1), `TAB_MATCH`
-(`copilot.cloud.microsoft`), `QUIET_MS` (1500 — silence that counts as
-"done streaming"), `ANSWER_TIMEOUT_MS` (120000).
+(`copilot.cloud.microsoft`), `STOP_SELECTOR` (auto — the control shown while
+generating), `QUIET_MS` (1500 — the fallback silence that counts as "done"),
+`ANSWER_TIMEOUT_MS` (120000).
 
 ## How a turn works
 
@@ -134,9 +135,8 @@ Other env vars: `CDP_PORT` (9222), `CDP_HOST` (127.0.0.1), `TAB_MATCH`
 2. Each prompt is run as one `Runtime.evaluate` of a self-contained function in
    the page: it sets the input text (native setter + `input` event for
    textareas; `execCommand('insertText')` for rich contenteditable editors),
-   sends (Enter, falling back to a send-button click), then waits on a
-   `MutationObserver` until the DOM has been quiet for `QUIET_MS` and no "stop
-   generating" control is present.
+   sends (Enter, falling back to a send-button click), then waits for the
+   answer to be finished (below).
 3. It reads the answer back from the nodes the page actually **added** during
    that wait — the largest new block outside the composer that is not the echo
    of your own prompt. Matching on added nodes rather than on class names keeps
@@ -246,6 +246,44 @@ one. The worst a confused reply can do is write a bad file inside the root.
 Writes and edits ask for confirmation first, unless `--yes`. Reads and
 listings do not ask. With no terminal to ask at, a write is refused rather
 than assumed.
+
+## Knowing when the answer is finished
+
+Waiting for the page to fall silent is a guess, and an expensive one. The
+page keeps moving after the last word of the answer — the suggestion chips,
+the copy and feedback toolbar, the "AI-generated content may be incorrect"
+footer — and each of those resets the silence. The answer therefore reached
+the terminal `QUIET_MS` **after all the trailing furniture had rendered**,
+which is well after it was readable on screen.
+
+The page already says when it is done: it shows a stop control while
+generating and removes it when it finishes. That is used as the signal, and
+three details make it reliable:
+
+- **Visibility is checked, not just presence.** A stop control left in the DOM
+  but hidden would otherwise read as "still generating" until the timeout.
+- **The watch starts the moment Enter is pressed**, not after the 400ms
+  send-confirmation pause. A short answer can be over inside that pause, and a
+  signal nobody was watching for is no signal.
+- **Two consecutive absences are required**, so a re-render that briefly drops
+  the control does not end the turn early.
+
+`QUIET_MS` remains the fallback for a page that never shows such a control,
+and there is a safety net: a stop control still present long after the page
+stopped changing is stale rather than generating, and is treated as finished
+after `QUIET_MS * 3` instead of hanging until `ANSWER_TIMEOUT_MS`.
+
+Every turn records which of these ended it, in `copilot-cli-lastturn.txt`:
+
+```json
+"wait": { "via": "stop-control-gone", "sawStop": true, "ms": 703 }
+```
+
+`via` is one of `stop-control-gone` (the exact signal), `quiet` (no stop
+control was ever visible), `stale-stop-control` (the safety net) or
+`timeout`. If yours says `quiet` every time, the stop control is not being
+found — pin it with `STOP_SELECTOR` and the turn gets about a second and a
+half shorter.
 
 ## When an answer still comes out wrong
 

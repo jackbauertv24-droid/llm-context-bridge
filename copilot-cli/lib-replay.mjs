@@ -94,6 +94,9 @@ export async function replay(capture, opts = {}) {
     inputSelector: opts.inputSelector || sel.input || '#m365-chat-editor-target-element',
     sendSelector: opts.sendSelector !== undefined ? opts.sendSelector : (sel.send || ''),
     answerSelector: opts.answerSelector || sel.answer || '[data-testid="markdown-reply"]',
+    // A replay has no live page, so there is never a stop control to watch;
+    // the quiet fallback is what ends the wait.
+    stopSelector: 'nothing-matches-this',
     quietMs: opts.quietMs || 60,
     answerTimeoutMs: opts.answerTimeoutMs || 4000,
     prompt,

@@ -24,7 +24,7 @@ import fs from 'node:fs';
 
 // Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
 // a previous build is otherwise indistinguishable from a fresh one.
-const VERSION = '2026-09-21.9';
+const VERSION = '2026-09-21.10';
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 import { askInPage } from './page-fn.mjs';
@@ -41,6 +41,9 @@ const CONFIG = {
   inputSelector: process.env.INPUT_SELECTOR || '#m365-chat-editor-target-element',
   sendSelector: process.env.SEND_SELECTOR || '',   // Copilot has none until you type; Enter sends
   answerSelector: process.env.ANSWER_SELECTOR || '[data-testid="markdown-reply"]',
+  // The control the page shows while it is generating. Its disappearance is
+  // how a turn knows it is finished; empty means auto-detect.
+  stopSelector: process.env.STOP_SELECTOR || '',
   quietMs: Number(process.env.QUIET_MS || 1500),     // silence that means "done streaming"
   answerTimeoutMs: Number(process.env.ANSWER_TIMEOUT_MS || 120000),
 };
@@ -102,7 +105,7 @@ manual attempt:
   node chat.mjs --replay copilot-cli-capture.json
 
 Env: CDP_PORT CDP_HOST TAB_MATCH INPUT_SELECTOR SEND_SELECTOR ANSWER_SELECTOR
-     QUIET_MS ANSWER_TIMEOUT_MS MAX_FILE_BYTES MAX_PROMPT_CHARS`;
+     STOP_SELECTOR QUIET_MS ANSWER_TIMEOUT_MS MAX_FILE_BYTES MAX_PROMPT_CHARS`;
 
 function readStdin() {
   return new Promise((resolve) => {
