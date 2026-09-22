@@ -116,6 +116,7 @@ With an authenticated Confluence tab open in Chrome:
 
 With mail.env set up, the agent also gets a read-only view of your mail:
 
+  node chat.mjs --record             record what the real page is and does
   node chat.mjs --mail-check          check the setup, one run, changes nothing
   node chat.mjs --agent:mail "summarise anything from the last 10 days that needs a reply"
   node chat.mjs --agent "..." --skills files,mail
@@ -681,6 +682,61 @@ async function runMailCheck(args) {
   return ok;
 }
 
+/**
+ * Write down what the real page is and does, once.
+ *
+ * Three builds in a row were fixed against a replica and failed against the
+ * page, because the replica was built from reasoning rather than from
+ * evidence. This sends one short message and records the answer to the
+ * questions that have actually mattered: does one insert produce one copy of
+ * the text, is a stop control present while the page is idle, does the
+ * composer empty on send, how much does the page move when nothing is
+ * happening, and how does an answer arrive.
+ */
+async function runRecord(cdp, args) {
+  const pi = args.indexOf('--prompt');
+  const probePrompt = pi !== -1 ? args[pi + 1] : 'ping';
+  const { recordPage } = await import('./lib-record.mjs');
+
+  note('[record] this sends ONE short message and watches what the page does.');
+  note(`[record] the message is: ${JSON.stringify(probePrompt)}`);
+  let rec;
+  try {
+    rec = await cdp.evalFn(recordPage, { ...CONFIG, probePrompt }, { timeoutMs: 90000 });
+  } catch (e) {
+    note('[record] failed: ' + e.message);
+    return false;
+  }
+  rec.version = VERSION;
+  rec.node = process.version;
+  try {
+    fs.writeFileSync('copilot-cli-page-record.json', JSON.stringify(rec, null, 1) + '\n');
+  } catch (e) { note('[record] could not write the file: ' + e.message); }
+
+  // The summary answers, in the terminal, so the shape of the page is
+  // visible without opening the file.
+  note('');
+  note(`input chosen:        ${rec.chosenInput ? rec.chosenInput.path : '(none found)'}`);
+  note(`one insert gives:    ${JSON.stringify(rec.insert ? rec.insert.got : null)}${rec.insert && rec.insert.doubled ? '   <-- DOUBLED' : ''}`);
+  note(`Enter was consumed:  ${rec.enter ? rec.enter.keydownDefaultPrevented : '?'}`);
+  note(`idle churn:          ${rec.idle.mutations} mutations and ${rec.idle.charGrowth} characters over 3s`);
+  note(`stop-like controls:  ${rec.stopLike.length} in the page, ${rec.idle.stopLikeVisibleWhileIdle.length} visible while idle`);
+  for (const b of rec.idle.stopLikeVisibleWhileIdle) note(`    ${b.path}  aria="${b.ariaLabel || ''}" testid="${b.testid || ''}"`);
+  note(`send-like controls:  ${rec.sendLike.length}`);
+  for (const b of rec.sendLike.slice(0, 4)) note(`    ${b.path}  aria="${b.ariaLabel || ''}" visible=${b.visible}`);
+  if (rec.turn && !rec.turn.skipped) {
+    note(`composer cleared at: ${rec.turn.composerClearedAt === null ? 'never' : rec.turn.composerClearedAt + 'ms'}`);
+    note(`stop appeared at:    ${rec.turn.stopAppearedAt === null ? 'never' : rec.turn.stopAppearedAt + 'ms'}`);
+    note(`stop went away at:   ${rec.turn.stopGoneAt === null ? 'never' : rec.turn.stopGoneAt + 'ms'}`);
+    note(`answer node at:      ${rec.turn.answerAppearedAt === null ? 'never' : rec.turn.answerAppearedAt + 'ms'}`);
+    note(`answer text:         ${JSON.stringify((rec.turn.lastAnswerText || '').slice(0, 90))}`);
+  }
+  note('');
+  note('[record] written to copilot-cli-page-record.json — send me that file.');
+  note('[record] it holds one short exchange; redact it if you would rather.');
+  return true;
+}
+
 async function attach({ fatal = true } = {}) {
   let target;
   try {
@@ -759,6 +815,9 @@ async function main() {
   const replayFile = takeFlag(args, '--replay');
   if (replayFile !== undefined) { process.exit((await runReplay(replayFile, args)) ? 0 : 2); }
 
+  const wantsRecord = args.includes('--record');
+  if (wantsRecord) takeBool(args, '--record');
+
   // Mail setup needs no page at all, so it runs before attaching.
   if (args.includes('--mail-check')) {
     takeBool(args, '--mail-check');
@@ -796,6 +855,12 @@ async function main() {
   const stdinText = piped && task === undefined ? await readStdin() : '';
 
   let cdp = await attach();
+
+  if (wantsRecord) {
+    const okay = await runRecord(cdp, args);
+    cdp.close();
+    process.exit(okay ? 0 : 1);
+  }
 
   // One shot: an agent task.
   if (task !== undefined) {
