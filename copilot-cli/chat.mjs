@@ -677,6 +677,9 @@ async function attach({ fatal = true } = {}) {
     process.exit(1);
   }
   note(`copilot-cli ${VERSION} — attached to: ${target.url}`);
+  // Say the limit out loud. It is the thing standing between a bug in
+  // this tool and a corporate account, and it should not be a surprise.
+  note(`[bridge] send budget: at most ${SEND_LIMITS.maxPerRun} messages this run, ${SEND_LIMITS.minIntervalMs}ms apart minimum.`);
   const cdp = new CDP(target.webSocketDebuggerUrl);
   try {
     await cdp.connect();
