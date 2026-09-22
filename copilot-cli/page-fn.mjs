@@ -164,7 +164,9 @@ export async function askInPage(cfg) {
   obs.observe(document.body, { subtree: true, childList: true, characterData: true });
 
   // 5. send: Enter first, click a send button as fallback
+  let submissions = 0;
   const fireEnter = (el, ctrl = false) => {
+    submissions++;
     for (const type of ['keydown', 'keypress', 'keyup']) {
       el.dispatchEvent(new KeyboardEvent(type, {
         key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
@@ -186,12 +188,12 @@ export async function askInPage(cfg) {
   const wait = { via: 'timeout', sawStop: false, ms: 0, selector: stopSelector, preflightMs, preflightTimedOut, inputWaitMs };
   let goneFor = 0;
 
-  // Send attempt 1: Enter
+  // Attempt one, and only one. Ctrl+Enter used to be fired immediately
+  // afterwards whenever the prompt contained a newline — which every agent
+  // prompt does — so two submissions went out back to back with nothing
+  // checked in between. It is now attempt two, and only if attempt one is
+  // seen to have failed.
   fireEnter(input);
-  if (cfg.prompt.includes('\n')) {
-    // In rich text editors (Lexical, ProseMirror), multiline text often requires Ctrl+Enter to submit
-    fireEnter(input, true);
-  }
 
   const sentAt = Date.now();
   // Started here, not after the send check below: a short answer can be over
@@ -263,81 +265,97 @@ export async function askInPage(cfg) {
 
   const isEnabled = (el) => el && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
 
-  const clickButton = (btn) => {
-    if (!btn) return;
-    try { btn.focus(); } catch { /* ignore */ }
-    const rect = typeof btn.getBoundingClientRect === 'function' ? btn.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0 };
-    const cx = rect.x + (rect.width || 0) / 2;
-    const cy = rect.y + (rect.height || 0) / 2;
-    const eventInit = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      view: typeof window !== 'undefined' ? window : null,
-      clientX: cx,
-      clientY: cy,
-      button: 0,
-      buttons: 1,
-    };
-    try {
-      if (typeof PointerEvent !== 'undefined') {
-        btn.dispatchEvent(new PointerEvent('pointerdown', eventInit));
-        btn.dispatchEvent(new MouseEvent('mousedown', eventInit));
-        btn.dispatchEvent(new PointerEvent('pointerup', { ...eventInit, buttons: 0 }));
-        btn.dispatchEvent(new MouseEvent('mouseup', { ...eventInit, buttons: 0 }));
-      }
-    } catch { /* fallback */ }
-    try {
-      btn.dispatchEvent(new MouseEvent('click', { ...eventInit, buttons: 0 }));
-    } catch { /* fallback */ }
+  /**
+   * Activate a control exactly once.
+   *
+   * The previous version dispatched a MouseEvent click, then called
+   * btn.click(), then clicked the first child, then called
+   * form.requestSubmit() — four submissions from one call, in a loop that
+   * ran every 450ms for three and a half seconds. Against a real chat
+   * backend that is around thirty copies of the same message. A send that
+   * does not register is cheap and visible; a send that registers thirty
+   * times is neither.
+   */
+  const activate = (btn) => {
+    if (!btn) return false;
+    submissions++;
+    try { btn.focus(); } catch { /* not focusable, still clickable */ }
     if (typeof btn.click === 'function') {
-      try { btn.click(); } catch { /* ignore */ }
+      try { btn.click(); return true; } catch { /* fall through to an event */ }
     }
-    const kid = btn.children && btn.children[0];
-    if (kid && typeof kid.dispatchEvent === 'function') {
-      try { kid.dispatchEvent(new MouseEvent('click', { ...eventInit, buttons: 0 })); } catch { /* ignore */ }
-    }
-    const form = (typeof btn.closest === 'function' && btn.closest('form')) || (typeof input.closest === 'function' && input.closest('form'));
-    if (form && typeof form.requestSubmit === 'function') {
-      try { form.requestSubmit(btn); } catch { /* ignore */ }
-    }
+    try {
+      const r = typeof btn.getBoundingClientRect === 'function' ? btn.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0 };
+      btn.dispatchEvent(new MouseEvent('click', {
+        bubbles: true, cancelable: true, composed: true,
+        clientX: r.x + (r.width || 0) / 2, clientY: r.y + (r.height || 0) / 2,
+      }));
+      return true;
+    } catch { return false; }
   };
 
   const hasText = () => {
-    const val = (input.value || input.innerText || '').trim();
+    // Both sides normalised. Comparing a whitespace-collapsed prompt lead
+    // against raw innerText meant that for any prompt containing a newline
+    // — which every agent prompt does — the comparison never matched, so
+    // the composer always looked empty and every send looked successful,
+    // including the ones that never left.
+    const val = norm(input.value || input.innerText || '');
     const promptLead = norm(cfg.prompt).slice(0, 20);
-    return val.length > 0 && val.includes(promptLead);
+    return val.length > 0 && promptLead.length > 0 && val.includes(promptLead);
   };
 
-  // Initial pause to see if Enter cleared the input or generation started
-  await sleep(300);
+  /**
+   * Did the send register?
+   *
+   * Three independent signs, any of which is enough: the composer emptied,
+   * the page put up a stop control, or a new answer block appeared. Relying
+   * on the composer alone was the mistake — a slow editor still holding the
+   * text reads as "not sent" and invites another attempt.
+   */
+  const sendRegistered = () => !hasText() || wait.sawStop || !!stopNow()
+    || answerBlocks().some((el) => !baseSet.has(el));
 
-  const SEND_WAIT_MS = 3500;
-  const pollStart = Date.now();
-  let clickedBtn = null;
-
-  while (hasText() && !wait.sawStop && !stopNow() && (Date.now() - pollStart < SEND_WAIT_MS)) {
-    const btn = findSendButton();
-    if (btn && isEnabled(btn)) {
-      clickButton(btn);
-      clickedBtn = btn;
-      await sleep(300);
-      if (!hasText() || wait.sawStop || stopNow()) break;
+  const waitForRegistration = async (ms) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (sendRegistered()) return true;
+      await sleep(100);
     }
-    await sleep(150);
+    return sendRegistered();
+  };
+
+  // Attempt one was the Enter above. Give it time before concluding anything.
+  let sent = await waitForRegistration(2500);
+
+  // Attempt two: Ctrl+Enter, which some rich editors want when the text
+  // spans several lines.
+  if (!sent && cfg.prompt.includes('\n')) {
+    log('Enter did not register after 2500ms; trying Ctrl+Enter once');
+    fireEnter(input, true);
+    sent = await waitForRegistration(2500);
   }
 
-  if (!hasText() || wait.sawStop || stopNow()) {
-    log(`sent successfully (via ${clickedBtn ? `button aria="${clickedBtn.getAttribute('aria-label') || ''}"` : 'Enter'})`);
-  } else {
-    // If text remains and generation hasn't started, make one last forced click if button exists
+  // Attempt three, and the last: a single activation of the send control.
+  if (!sent) {
     const btn = findSendButton();
-    if (btn) {
-      log(`waited ${Date.now() - pollStart}ms for send button; forced click aria="${btn.getAttribute('aria-label') || ''}" text="${(btn.textContent || '').trim().slice(0, 30)}"`);
-      clickButton(btn);
+    if (btn && isEnabled(btn)) {
+      log(`still not registered; clicking send once, aria="${btn.getAttribute('aria-label') || ''}"`);
+      activate(btn);
+      sent = await waitForRegistration(2500);
     } else {
-      log('Enter and button click both failed: text remains in input and no send button found');
+      log('no enabled send control was found to try');
     }
+  }
+
+  // There is no attempt four. Retrying past this point is how the same
+  // prompt ends up in the conversation several times over, and a send that
+  // silently fails is far cheaper to recover from than one that succeeds
+  // thirty times.
+  wait.submissions = submissions;
+  if (sent) {
+    log(`send registered after ${submissions} submission${submissions === 1 ? '' : 's'}`);
+  } else {
+    log(`send did NOT register after ${submissions} submission${submissions === 1 ? '' : 's'}; giving up rather than sending again`);
   }
 
   // 6. wait for the answer to be finished

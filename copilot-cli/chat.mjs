@@ -160,6 +160,12 @@ async function askPage(cdp, full, retries = 2) {
     return null;
   }
   lastDebug = res.debug;
+  // Sending more than once is the failure that costs the most on a
+  // corporate backend, so it is said out loud rather than left in a file.
+  const w = res.debug && res.debug.wait;
+  if (w && w.submissions > 1) {
+    note(`[bridge] the send needed ${w.submissions} attempts (${w.via}); only the one that registered was accepted.`);
+  }
   // Two files: a small one that is pasteable, and the DOM capture that makes
   // a wrong answer fixable without asking for another run.
   const capture = res.debug && res.debug.capture;
