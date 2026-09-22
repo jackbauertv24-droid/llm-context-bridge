@@ -13,6 +13,7 @@ import {
 } from '../lib-skills.mjs';
 import { confluenceHtmlToText } from '../lib-confluence.mjs';
 import { renderSystemPrompt } from '../lib-agent.mjs';
+import { askInPage } from '../page-fn.mjs';
 
 test('parseAgentCommand parses standard /agent tasks', () => {
   const res = parseAgentCommand('/agent refactor auth.js');
@@ -176,4 +177,9 @@ test('renderSystemPrompt for confluence skill enforces read-only mode and drops 
   assert.match(prompt, /All tools in this session are strictly read-only/);
   assert.doesNotMatch(prompt, /write replaces the whole file/);
   assert.doesNotMatch(prompt, /WHEN NOT TO CHANGE ANYTHING/);
+});
+
+test('askInPage module exports valid executable function', () => {
+  assert.equal(typeof askInPage, 'function');
+  assert.equal(askInPage.constructor.name, 'AsyncFunction');
 });

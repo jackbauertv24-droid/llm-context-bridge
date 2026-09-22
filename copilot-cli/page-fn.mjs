@@ -58,8 +58,10 @@ export async function askInPage(cfg) {
   // 2. Baseline BEFORE the prompt is typed. Measuring it after meant that
   // clearing the composer on send shifted every later offset, which is what
   // chopped the first characters off the answer.
-  const bodyBaseLen = document.body.innerText.length;
-  const composer = input.closest('form') || input.parentElement;
+  const composer = (typeof input.closest === 'function' && (input.closest('form, [role="region"], [class*="composer" i], [class*="chat-input" i], [data-testid*="composer" i]')
+    || input.parentElement?.parentElement?.parentElement
+    || input.parentElement?.parentElement))
+    || input.parentElement;
 
   // Pre-flight check: ensure Copilot is not currently streaming a previous answer
   const stopSelector = cfg.stopSelector
@@ -174,10 +176,6 @@ export async function askInPage(cfg) {
   }, TICK);
 
   const inputRect = typeof input.getBoundingClientRect === 'function' ? input.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0 };
-  const composer = (typeof input.closest === 'function' && (input.closest('form, [role="region"], [class*="composer" i], [class*="chat-input" i], [data-testid*="composer" i]')
-    || input.parentElement?.parentElement?.parentElement
-    || input.parentElement?.parentElement))
-    || input.parentElement;
 
   const describeBtn = (btn) => {
     const aria = btn.getAttribute('aria-label') || '';
