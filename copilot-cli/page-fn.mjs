@@ -28,6 +28,27 @@ export async function askInPage(cfg) {
    * turn was then refused for holding the wrong text — on every message,
    * including a two-letter "hi".
    */
+  /**
+   * The same text, after the editor has had its way with it.
+   *
+   * This composer auto-formats markdown: it turns "- " lines into list items
+   * and "# " lines into headings and eats the markers, and it consumes code
+   * fences. The agent's instructions are full of all three, so forty
+   * characters of a two-thousand-six-hundred character prompt vanished and
+   * the turn was refused for holding the wrong text. Comparing what was
+   * typed against what the box holds is only meaningful once both have been
+   * through the same reduction.
+   */
+  const compareText = (s) => norm(String(s || '')
+    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD\u180E]/g, '')
+    .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+    .replace(/\u00A0/g, ' ')
+    .split(/\r?\n/)
+    .map((line) => line
+      .replace(/^\s*(?:[-*+]\s+|#{1,6}\s+|>\s+|\d+[.)]\s+)/, '')
+      .replace(/^\s*`{3,}[\w-]*\s*$/, ''))
+    .join('\n'));
+
   const visibleText = (s) => norm(String(s || '')
     .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD\u180E]/g, '')
     .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
@@ -240,7 +261,7 @@ export async function askInPage(cfg) {
     // Verify rather than assume. Too much text is as wrong as too little,
     // and the doubling above went unnoticed because the old check used
     // !== on trimmed text and then *appended* a correction.
-    if (visibleText(input.innerText) !== visibleText(cfg.prompt)) {
+    if (compareText(input.innerText) !== compareText(cfg.prompt)) {
       // Repairing this is a safety net, not a success. Recorded, because a
       // silent repair hides the fault that made it necessary: the doubled
       // insert was corrected here and so looked fine from the outside.
@@ -268,13 +289,39 @@ export async function askInPage(cfg) {
   // though nothing were wrong, because the length was never compared with
   // the length expected. A wrong message costs the same as a right one and
   // teaches the model something untrue, so it is not sent.
-  const inBox = visibleText(input.value || input.innerText || '');
-  const wanted = visibleText(cfg.prompt);
-  debug.composer = { expected: wanted.length, actual: inBox.length, matched: inBox === wanted, corrected: composerCorrected };
-  if (inBox !== wanted) {
-    const doubled = inBox.length >= wanted.length * 2 && inBox.startsWith(wanted);
+  const inBox = compareText(input.value || input.innerText || '');
+  const wanted = compareText(cfg.prompt);
+  const ratio = wanted.length ? inBox.length / wanted.length : (inBox.length ? 99 : 1);
+  // WHEN TO REFUSE TO SEND
+  //
+  // Almost never. Every outage in this bridge so far has been one of these
+  // checks refusing, not the page failing: a busy-check that read an idle
+  // page as generating and blocked every message, and this check reading a
+  // markdown-reformatted prompt as corrupt and stopping the agent on its
+  // first task. A guard built against a bug became the next bug, twice.
+  //
+  // Not sending is a certain failure. Sending something slightly off is a
+  // probable success. So refusal is reserved for the two cases where
+  // proceeding is clearly worse: nothing to send at all, and text that
+  // plainly arrived more than once. A threshold anywhere in between is just
+  // another way to fail, and the 0.8 that used to be here is exactly how
+  // this one happened.
+  const doubled = wanted.length > 0 && ratio > 1.8;
+  const gutted = wanted.length > 0 && inBox.length === 0;
+  debug.composer = {
+    expected: wanted.length,
+    actual: inBox.length,
+    ratio: Math.round(ratio * 100) / 100,
+    matched: inBox === wanted,
+    corrected: composerCorrected,
+  };
+
+  // Only a doubling or a large loss is a fault. A few percent is this page
+  // reformatting markdown, and refusing over that stopped the agent dead on
+  // its first real task.
+  if (doubled || gutted) {
     log(`the composer holds ${inBox.length} characters where ${wanted.length} were expected`
-      + `${doubled ? ' — the text was inserted more than once' : ''}`);
+      + `${doubled ? ' — the text was inserted more than once' : ' — nothing arrived at all'}`);
     clearComposer();
     debug.wait = { via: 'not-sent-bad-composer', sawStop: false, ms: 0, submissions: 0 };
     return {
@@ -282,11 +329,18 @@ export async function askInPage(cfg) {
       notSent: true,
       badComposer: true,
       text: '',
-      method: `not sent: the composer held ${inBox.length} characters instead of ${wanted.length}`,
+      method: `not sent: the composer held ${inBox.length} characters instead of ${wanted.length}`
+        + `${doubled ? ' (inserted more than once)' : ' (the box is empty)'}`,
       debug,
     };
   }
-  log(`text set, input holds exactly the ${inBox.length} characters expected`);
+  if (inBox !== wanted) {
+    // Recorded, never refused. The difference is almost always this page
+    // reformatting markdown, and it is in the diagnostics if it ever is not.
+    log(`the composer holds ${inBox.length} of ${wanted.length} expected characters `
+      + `(ratio ${debug.composer.ratio}); sending anyway`);
+  }
+
 
   const answerBlocks = () => {
     if (cfg.answerSelector) {

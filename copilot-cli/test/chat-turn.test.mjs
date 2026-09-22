@@ -305,3 +305,94 @@ test('an editor that anchors with zero-width characters still sends', async () =
     assert.equal(res.text, 'hello back');
   } finally { restore(); }
 });
+
+test('a composer that reformats markdown does not block the agent prompt', async () => {
+  // OBSERVED: the first real agent task died with "the composer held 2584
+  // characters instead of 2624". The page auto-formats markdown — it eats
+  // "- " list markers, "# " headings and code fences — and the agent's
+  // instructions are full of all three, so forty characters of a 2624
+  // character prompt vanished and the turn was refused for holding the
+  // wrong text. A few percent is the editor working, not a fault.
+  const restore = installGlobals();
+  try {
+    resetDom();
+    const feed = new El('div', { role: 'feed' });
+    doc.body.append(new El('div', { 'data-testid': 'MessageListContainer' })).append(feed);
+    const input = new El('span', { id: 'ed', role: 'textbox', contenteditable: 'true' });
+    input.rect = { x: 0, y: 800, width: 700, height: 27 };
+    doc.body.append(new El('div', { class: 'composer' })).append(input);
+    doc._editor = input;
+
+    // The editor strips the markers as it formats.
+    Object.defineProperty(input, 'innerText', {
+      get() {
+        const raw = this.children.length
+          ? this.children.map((c) => c.innerText).filter((t) => t !== '').join('\n')
+          : this._text;
+        return String(raw || '')
+          .split('\n')
+          .map((l) => l.replace(/^(?:[-*+]\s+|#{1,6}\s+)/, '').replace(/^```+\w*$/, ''))
+          .join('\n');
+      },
+      set(v) { this.children = []; this._text = v; },
+      configurable: true,
+    });
+
+    let received = null;
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      received = input.innerText;
+      input.textContent = '';
+      const t = new El('div', { 'data-testid': 'copilot-message-div' });
+      const md = new El('div', { 'data-testid': 'markdown-reply' });
+      md.append(new El('p', {}, 'hello back'));
+      t.append(md);
+      feed.append(t);
+    });
+
+    const prompt = [
+      'You are a coding agent.', '', 'TOOLS',
+      '# read a file', '<copilot:read path="src/index.js"/>', '',
+      'RULES',
+      '- A tool tag must start at the beginning of a line.',
+      '- Paths are relative to the workspace root.',
+      '- write replaces the whole file.', '',
+      '```', '<copilot:read path="src/index.js"/>', '```', '',
+      'TASK: what files are here?',
+    ].join('\n');
+
+    const res = await askInPage({ ...CFG, prompt });
+    assert.equal(res.notSent, undefined, `refused: ${res.method}`);
+    assert.ok(received, 'the page should have received the prompt');
+    assert.ok(res.debug.composer.ratio > 0.9, `only ${res.debug.composer.ratio} of the prompt arrived`);
+    assert.equal(res.text, 'hello back');
+  } finally { restore(); }
+});
+
+test('a genuinely doubled prompt is still refused', async () => {
+  // The tolerance above must not swallow the fault it was built around.
+  const restore = installGlobals();
+  try {
+    resetDom();
+    const input = new El('span', { id: 'ed', role: 'textbox', contenteditable: 'true' });
+    input.rect = { x: 0, y: 800, width: 700, height: 27 };
+    doc.body.append(new El('div', { class: 'composer' })).append(input);
+    doc._editor = input;
+    input.addEventListener('beforeinput', (ev) => {
+      if (ev.inputType === 'insertText' && ev.data) input.textContent = (input.innerText || '') + ev.data;
+    });
+    // An editor that inserts twice and cannot be corrected.
+    const origSet = Object.getOwnPropertyDescriptor(El.prototype, 'textContent');
+    void origSet;
+    Object.defineProperty(input, 'textContent', {
+      set(v) { this.children = []; this._text = v ? String(v) + String(v) : ''; },
+      get() { return this._text; },
+      configurable: true,
+    });
+
+    const res = await askInPage({ ...CFG, prompt: 'hello there' });
+    assert.equal(res.notSent, true, 'a doubled prompt must not be sent');
+    assert.equal(res.badComposer, true);
+  } finally { restore(); }
+});
