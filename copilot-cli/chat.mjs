@@ -31,6 +31,9 @@ import { askInPage } from './page-fn.mjs';
 import { createAgentSession, runAgent, defaultTools } from './lib-agent.mjs';
 import { resolveRoot, ToolError } from './lib-fstools.mjs';
 import { loadMailConfig, configComplaint, mailTools, readMail, listFolders, probeEwsSearch } from './lib-mailtool.mjs';
+import { createDefaultRegistry, parseAgentCommand, formatSkillsList } from './lib-skills.mjs';
+
+const registry = createDefaultRegistry();
 
 const CONFIG = {
   host: process.env.CDP_HOST || '127.0.0.1',
@@ -81,10 +84,11 @@ into the page for you:
   @"my notes.md"       a path with spaces
   @src/                a directory listing
 
-Commands:  /probe  re-inventory the page   |  /debug   last turn's diagnostics
-           /config show settings           |  /replay re-extract the last turn
-           /agent  <task> — let it work on your files (see below)
-           /help   this text               |  /quit
+Commands:  /probe   re-inventory the page   |  /debug   last turn's diagnostics
+           /config  show settings           |  /replay  re-extract the last turn
+           /skills  list available skills   |  /new     reset agent context
+           /agent   <task> — code on files (or /agent:mail for read-only mail)
+           /help    this text               |  /quit
 
 Agent mode gives the chat three verbs it does not natively have — read, write
 and list files (plus edit for a targeted change) — by asking it to emit tagged
@@ -93,15 +97,21 @@ blocks that this CLI executes. Ported from the clichat harness.
   node chat.mjs --agent "add a --version flag to cli.js"
   node chat.mjs --agent "..." --root ../myproject --yes
 
-Everything is confined to the workspace root (the current directory unless
---root says otherwise); paths outside it are refused, symlinks are not
-followed, and nothing is ever executed. Writes and edits ask first, unless
---yes. Reads and listings do not ask.
+Skills isolate capabilities by domain so the model stays focused, avoiding
+distraction and protecting against prompt-injection from external text:
+
+  /agent <task>              code on files in workspace (default)
+  /agent:mail <task>         read-only mail agent (no file write access)
+  /agent +mail <task>        code + mail reading combined
+  /agent:all <task>          all active configured skills
+  /skills                    list skills and configuration status
+  /new or /reset             reset agent session & prompt context
 
 With mail.env set up, the agent also gets a read-only view of your mail:
 
   node chat.mjs --mail-check          check the setup, one run, changes nothing
-  node chat.mjs --agent "summarise anything from the last 10 days that needs a reply"
+  node chat.mjs --agent:mail "summarise anything from the last 10 days that needs a reply"
+  node chat.mjs --agent "..." --skills files,mail
 
 Reading is the only thing it can do: no sending, no replying, no moving, and
 the read flag is never set. Over Exchange it issues FindFolder, FindItem and
@@ -260,19 +270,8 @@ function approver({ yes, question }) {
   };
 }
 
-/**
- * The tools this run offers. Mail joins the set only when it is configured:
- * advertising a tool that cannot work teaches the model to keep trying it,
- * and its failures would fill the conversation.
- */
-function toolsetFor(root, mailEnv) {
-  const cfg = loadMailConfig({ root, envPath: mailEnv });
-  if (!cfg.configured) return { tools: defaultTools, mail: cfg };
-  return { tools: { ...defaultTools, ...mailTools(cfg) }, mail: cfg };
-}
-
 /** Run one agent task to completion over an already-attached page. */
-async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv }) {
+async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv, skillName = 'default' }) {
   let sess = session;
   if (!sess) {
     try {
@@ -284,8 +283,27 @@ async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv }
   }
   note(`[agent] workspace: ${sess.root}`);
 
-  const { tools, mail } = toolsetFor(sess.root, mailEnv);
-  if (mail.configured) note(`[agent] mail: ${mail.user} at ${mail.host} (read-only)`);
+  let resolved;
+  try {
+    resolved = registry.resolve(skillName, { root: sess.root, mailEnv });
+  } catch (err) {
+    note(`[agent] ${err.message}`);
+    return false;
+  }
+
+  // Detect skill changes in an existing session to re-prime the system prompt:
+  const currentSkillIds = resolved.activeSkills.map((s) => s.id).sort().join(',');
+  if (sess.activeSkillIds && sess.activeSkillIds !== currentSkillIds) {
+    note(`[agent] active skills changed (${sess.activeSkillIds} -> ${currentSkillIds}); updating prompt context.`);
+    sess.primed = false;
+  }
+  sess.activeSkillIds = currentSkillIds;
+
+  note(`[agent] active skills: ${resolved.summary}`);
+  for (const s of resolved.activeSkills) {
+    const st = s.isAvailable({ root: sess.root, mailEnv });
+    if (st.detail) note(`  - ${s.name}: ${st.detail}${s.mutates ? '' : ' (read-only)'}`);
+  }
 
   const res = await runAgent({
     ask: (prompt) => askPage(cdp, prompt),
@@ -293,7 +311,8 @@ async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv }
     session: sess,
     approve: approver({ yes, question }),
     ui: agentUI(),
-    tools,
+    tools: resolved.tools,
+    skills: resolved.activeSkills,
   });
   if (res.done) note(`[agent] done in ${res.steps} step${res.steps === 1 ? '' : 's'}.`);
   else note(`[agent] stopped after ${res.steps} steps — ${res.stalled}.`);
@@ -569,7 +588,21 @@ async function main() {
   const mailEnv = takeFlag(args, '--mail-env');
   const rootArg = takeFlag(args, '--root');
   const yes = takeBool(args, '--yes', '-y');
-  const task = takeFlag(args, '--agent');
+  const skillArg = takeFlag(args, '--skill') || takeFlag(args, '--skills');
+  let task = takeFlag(args, '--agent');
+  let activeSkillName = skillArg || 'default';
+
+  // Support shorthand subcommands: --agent:mail "task", --agent:code "task", etc.
+  if (task === undefined) {
+    for (let i = 0; i < args.length; i++) {
+      if (args[i].startsWith('--agent:')) {
+        activeSkillName = args[i].slice('--agent:'.length);
+        task = args[i + 1] !== undefined && !args[i + 1].startsWith('-') ? args[i + 1] : '';
+        args.splice(i, task !== '' ? 2 : 1);
+        break;
+      }
+    }
+  }
 
   const argvPrompt = args.filter((a) => !a.startsWith('-')).join(' ').trim();
   const piped = !process.stdin.isTTY;
@@ -579,8 +612,11 @@ async function main() {
 
   // One shot: an agent task.
   if (task !== undefined) {
-    if (!task.trim()) { note('usage: node chat.mjs --agent "the task" [--root dir] [--yes]'); process.exit(2); }
-    const okay = await runAgentTask(cdp, task, { root: rootArg, yes, question: askOnce(), mailEnv });
+    if (!task.trim()) { note('usage: node chat.mjs --agent[:skill] "the task" [--root dir] [--skills list] [--yes]'); process.exit(2); }
+    const okay = await runAgentTask(cdp, task, {
+      root: rootArg, yes, question: askOnce(), mailEnv,
+      skillName: activeSkillName,
+    });
     cdp.close();
     process.exit(okay ? 0 : 1);
   }
@@ -607,9 +643,22 @@ async function main() {
     if (q === '/quit' || q === '/exit') { rl.close(); return; }
     if (q === '/help') { note(HELP); rl.prompt(); return; }
     if (q === '/config') { note(JSON.stringify({ ...CONFIG, ...LOCAL }, null, 2)); rl.prompt(); return; }
-    if (q === '/agent' || q.startsWith('/agent ')) {
-      const task = q.slice('/agent'.length).trim();
-      if (!task) { note('usage: /agent <what you want done>'); rl.prompt(); return; }
+    if (q === '/new' || q === '/reset') {
+      agentSession = null;
+      lastDebug = null;
+      note('[agent] session reset; next turn will begin with a fresh prompt and toolset.');
+      rl.prompt(); return;
+    }
+    if (q === '/skills') {
+      note(formatSkillsList(registry, { root: rootArg || LOCAL.cwd, mailEnv }));
+      rl.prompt(); return;
+    }
+    if (q === '/agent' || q.startsWith('/agent ') || q.startsWith('/agent:') || q.startsWith('/agent+')) {
+      const parsed = parseAgentCommand(q);
+      if (!parsed.task) {
+        note('usage: /agent[:skill] <what you want done>  (type /skills to list available skills)');
+        rl.prompt(); return;
+      }
       cdp = await ensureAttached(cdp);
       if (!cdp) { rl.prompt(); return; }
       if (!agentSession) {
@@ -617,7 +666,10 @@ async function main() {
           agentSession = createAgentSession(resolveRoot(rootArg || LOCAL.cwd));
         } catch (e) { note('[agent] ' + e.message); rl.prompt(); return; }
       }
-      await runAgentTask(cdp, task, { yes, question: ask, session: agentSession, mailEnv });
+      await runAgentTask(cdp, parsed.task, {
+        yes, question: ask, session: agentSession, mailEnv,
+        skillName: parsed.skillName,
+      });
       rl.prompt(); return;
     }
     if (q === '/replay' || q.startsWith('/replay ')) {

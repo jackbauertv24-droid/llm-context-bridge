@@ -63,9 +63,30 @@ export function countMentions(text) {
 
 // ---------------------------------------------------------------- protocol
 
-export function renderSystemPrompt(root, tools = defaultTools) {
+export function renderSystemPrompt(root, tools = defaultTools, { skills = null } = {}) {
+  const activeSkills = skills && skills.length ? skills : null;
+  const anyMutates = activeSkills
+    ? activeSkills.some((s) => s.mutates)
+    : Object.values(tools).some((t) => t.mutates);
+
+  const sampleTag = activeSkills && activeSkills[0]?.sampleTag
+    ? activeSkills[0].sampleTag
+    : `<${NS}:read path="src/index.js"/>`;
+
+  let roleDesc = "You are a coding agent working in a checkout on the user's machine.";
+  if (activeSkills) {
+    const hasCode = activeSkills.some((s) => s.domain === 'code');
+    if (!hasCode) {
+      if (activeSkills.length === 1 && activeSkills[0].id === 'mail') {
+        roleDesc = "You are an assistant with read-only access to the user's corporate mail.";
+      } else {
+        roleDesc = "You are an assistant with access to specific tools on the user's machine.";
+      }
+    }
+  }
+
   const lines = [
-    'You are a coding agent working in a checkout on the user\'s machine.',
+    roleDesc,
     'You act by emitting tool tags, which a bridge outside this chat executes',
     'for you. You cannot see the machine except through their results.',
     '',
@@ -82,7 +103,7 @@ export function renderSystemPrompt(root, tools = defaultTools) {
     '- Put every tool tag inside a fenced code block, on its own, like this:',
     '',
     '```',
-    `<${NS}:read path="src/index.js"/>`,
+    sampleTag,
     '```',
     '',
     '  The fence matters: it is what stops this chat from reformatting the tag',
@@ -91,27 +112,59 @@ export function renderSystemPrompt(root, tools = defaultTools) {
     '- A tag ANYWHERE in your reply is executed. It is not an illustration.',
     '  Never quote, mention or give an example of a tag while explaining',
     '  something. Describe the change in words instead.',
-    '- Paths are relative to the workspace root. Never use absolute paths or "..".',
-    '- Use edit to change a file that already exists, and write only to create a',
-    '  new one or to replace a file wholesale.',
-    '- Read a file before you edit it, and quote the SEARCH lines exactly as they',
-    '  appear, including indentation. SEARCH must match one place in the file; if',
-    '  it could match more, include more surrounding lines.',
-    '- write replaces the whole file. Emit the complete new contents, never a diff',
-    '  and never a fragment with "... rest unchanged".',
-    '- The body of a write tag is literal file content. Do not escape it.',
+  );
+
+  // If specific skills provide guidance rules, render them here:
+  if (activeSkills) {
+    for (const s of activeSkills) {
+      if (s.promptRules && s.promptRules.length) {
+        lines.push(...s.promptRules);
+      }
+    }
+  } else {
+    // Legacy / default rules when skills array is not provided
+    lines.push(
+      '- Paths are relative to the workspace root. Never use absolute paths or "..".',
+      '- Use edit to change a file that already exists, and write only to create a',
+      '  new one or to replace a file wholesale.',
+      '- Read a file before you edit it, and quote the SEARCH lines exactly as they',
+      '  appear, including indentation. SEARCH must match one place in the file; if',
+      '  it could match more, include more surrounding lines.',
+      '- write replaces the whole file. Emit the complete new contents, never a diff',
+      '  and never a fragment with "... rest unchanged".',
+      '- The body of a write tag is literal file content. Do not escape it.',
+    );
+  }
+
+  lines.push(
     '- You may emit several tags in one reply; they run in order.',
     '- After each reply that contains tags, you will be shown the results and can',
     '  continue. When the task is done, reply with prose and no tags at all.',
     '- Keep prose short. Say what you are about to do, not what you might do.',
-    '',
-    'WHEN NOT TO CHANGE ANYTHING',
-    '- If the task only asks you to look at code — review it, audit it, explain',
-    '  it, find a bug, answer a question about it — then read and list are the',
-    '  only tools you may use. Report what you found in prose and stop.',
-    '- Every write and edit interrupts the user to ask permission. Do not emit',
-    '  one unless the task actually asked for the file to change.',
-    '- Proposing a change is prose. Making one is a tag. Do not confuse them.',
+  );
+
+  if (anyMutates) {
+    lines.push(
+      '',
+      'WHEN NOT TO CHANGE ANYTHING',
+      '- If the task only asks you to look at code — review it, audit it, explain',
+      '  it, find a bug, answer a question about it — then read and list are the',
+      '  only tools you may use. Report what you found in prose and stop.',
+      '- Every write and edit interrupts the user to ask permission. Do not emit',
+      '  one unless the task actually asked for the file to change.',
+      '- Proposing a change is prose. Making one is a tag. Do not confuse them.',
+    );
+  } else {
+    lines.push(
+      '',
+      'READ-ONLY MODE',
+      '- All tools in this session are strictly read-only. You cannot mutate files,',
+      '  modify server state, or send messages.',
+      '- Proposing a change or action is prose. Report what you found in prose and stop.',
+    );
+  }
+
+  lines.push(
     '',
     `The workspace root is ${root}`,
   );
@@ -223,6 +276,7 @@ export function createAgentSession(root) {
 export async function runAgent({
   ask, task, session, maxSteps = 16, approve = async () => true, ui,
   tools = defaultTools,
+  skills = null,
 }) {
   const ctx = { root: session.root };
 
@@ -230,7 +284,7 @@ export async function runAgent({
   // repeating them every task would pay for context the session already has.
   let prompt = session.primed
     ? task
-    : `${renderSystemPrompt(session.root, tools)}\n\nTASK: ${task}`;
+    : `${renderSystemPrompt(session.root, tools, { skills })}\n\nTASK: ${task}`;
   session.primed = true;
 
   for (let step = 1; step <= maxSteps; step++) {

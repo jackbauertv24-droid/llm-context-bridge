@@ -163,6 +163,7 @@ selector tweak, not a rewrite.
 | `page-fn.mjs` | The function evaluated in the tab: type, send, wait, extract |
 | `lib-files.mjs` | `@path` expansion into attachment blocks |
 | `lib-agent.mjs` | The agent loop and tool-tag protocol (ported from clichat) |
+| `lib-skills.mjs` | Domain-scoped skill bundles, registry, and command parser |
 | `PORTING-BACK-TO-CLICHAT.md` | The fixes found here that clichat still needs |
 | `lib-fstools.mjs` | read / write / list / edit, confined to one directory |
 | `lib-mailtool.mjs` | the mail tools, their settings and redaction |
@@ -181,23 +182,43 @@ the same problem against a different backend.
 
 ```sh
 node chat.mjs --agent "add a --version flag to cli.js"
+node chat.mjs --agent:mail "summarise unread emails"
 node chat.mjs --agent "..." --root ../myproject --yes
 ```
 
 or `/agent <task>` in the REPL, which keeps one conversation across tasks so
 a follow-up lands in a session that still remembers the files it read.
 
-Four verbs, described to the model in a sentence each rather than as JSON
-Schema:
+### Skill Bundles: domain scoping & security
 
-| Tag | Does |
-|---|---|
-| `<copilot:read path="..."/>` | read a file |
-| `<copilot:list path="..."/>` | list a directory |
-| `<copilot:write path="...">…</copilot:write>` | create or replace a file |
-| `<copilot:edit path="...">…</copilot:edit>` | a SEARCH/REPLACE block |
-| `<copilot:mail days="10"/>` | read recent mail (only when configured) |
-| `<copilot:mailboxes/>` | list mail folders (only when configured) |
+Rather than advertising all tools at once—which dilutes model attention and
+risks prompt-injection when external mail text encounters write tools—skills are
+isolated into domain bundles:
+
+| Skill | Category | Tools | Default / Behavior |
+|---|---|---|---|
+| `files` (or `code`) | Coding | `read`, `list`, `write`, `edit` | **Default** for `/agent`. Confined to `--root`. |
+| `mail` | Agenda | `mail`, `mailboxes` | **Strictly read-only**. No write tools in prompt. |
+| `logs` | Ops | `log.tail`, `log.grep` | (Planned) Read-only SSH log access. |
+| `teams` | Collab | `teams.search` | (Planned) Read-only chat search. |
+| `confluence` | Knowledge | `wiki.get` | (Planned) Read-only corporate wiki. |
+
+Use them in the REPL or CLI:
+
+```sh
+/agent <task>              # coding agent (files only, default)
+/agent:mail <task>         # read-only mail agent (no file write/edit tools in prompt)
+/agent +mail <task>        # compose coding + mail reading together
+/agent:all <task>          # all active configured skills
+/skills                    # view status of all registered skills
+/new (or /reset)           # reset session and clear primed prompt context
+```
+
+CLI flags:
+```sh
+node chat.mjs --agent:mail "summarise unread"
+node chat.mjs --agent "summarise" --skills files,mail
+```
 
 The grammar is a tag with a **raw body**, not JSON, because the thing an agent
 mostly emits is the contents of a source file — and a model that was never
