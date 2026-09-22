@@ -183,3 +183,31 @@ test('askInPage module exports valid executable function', () => {
   assert.equal(typeof askInPage, 'function');
   assert.equal(askInPage.constructor.name, 'AsyncFunction');
 });
+
+test('askInPage executes against DOM and handles input and baseline without ReferenceError', async () => {
+  const { installGlobals, resetDom, El, document: doc } = await import('../lib-dom.mjs');
+  const restore = installGlobals();
+  try {
+    resetDom();
+    const input = new El('div', { id: 'm365-chat-editor-target-element', contenteditable: 'true' });
+    const sendBtn = new El('button', { 'aria-label': 'Send' });
+    const composer = new El('div', { class: 'composer' });
+    composer.append(input, sendBtn);
+    doc.body.append(composer);
+    doc._editor = input;
+
+    // Run askInPage with short timeout so it completes quickly in test
+    const res = await askInPage({
+      inputSelector: '#m365-chat-editor-target-element',
+      prompt: 'hello world test prompt',
+      answerTimeoutMs: 300,
+      quietMs: 100,
+    });
+
+    assert.ok(res);
+    assert.ok(res.debug);
+    assert.equal(typeof res.debug.wait.ms, 'number');
+  } finally {
+    restore();
+  }
+});

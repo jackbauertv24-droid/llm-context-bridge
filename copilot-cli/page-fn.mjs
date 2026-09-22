@@ -58,6 +58,7 @@ export async function askInPage(cfg) {
   // 2. Baseline BEFORE the prompt is typed. Measuring it after meant that
   // clearing the composer on send shifted every later offset, which is what
   // chopped the first characters off the answer.
+  const bodyBaseLen = document.body.innerText.length;
   const composer = (typeof input.closest === 'function' && (input.closest('form, [role="region"], [class*="composer" i], [class*="chat-input" i], [data-testid*="composer" i]')
     || input.parentElement?.parentElement?.parentElement
     || input.parentElement?.parentElement))
