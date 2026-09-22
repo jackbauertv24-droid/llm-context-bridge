@@ -327,6 +327,12 @@ export async function inTabProbeConfluence() {
  * Searches Confluence inside the authenticated tab.
  * Handles space filtering, executes search, and normalizes output into a clean structure.
  */
+/** The space key as it appears in a webui link: /spaces/<KEY>/pages/... */
+function spaceKeyFromLink(webui) {
+  const m = /\/spaces\/([^/]+)\//.exec(String(webui || ''));
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
 export async function inTabSearchConfluence({ query, space, limit = 5, strategy = null }) {
   const origin = window.location.origin;
   let contextPath = '';
@@ -343,7 +349,10 @@ export async function inTabSearchConfluence({ query, space, limit = 5, strategy 
 
   // Try Strategy 1: REST v1 with siteSearch
   const cql1 = `${spaceClause}(siteSearch ~ "${q.replace(/["\\]/g, '')}" or text ~ "${q.replace(/["\\]/g, '')}")`;
-  const url1 = `${origin}${contextPath}/rest/api/content/search?cql=${encodeURIComponent(cql1)}&limit=${lim}`;
+  // expand=space so the space key comes back; without it every result
+  // reported "space: none" even though the link plainly contained it.
+  const expand = '&expand=space,version';
+  const url1 = `${origin}${contextPath}/rest/api/content/search?cql=${encodeURIComponent(cql1)}&limit=${lim}${expand}`;
 
   try {
     const res1 = await fetch(url1, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
@@ -358,7 +367,7 @@ export async function inTabSearchConfluence({ query, space, limit = 5, strategy 
             id: r.id,
             title: r.title,
             type: r.type,
-            spaceKey: r.space?.key || '',
+            spaceKey: r.space?.key || spaceKeyFromLink(r._links?.webui),
             spaceName: r.space?.name || '',
             url: r._links?.webui ? `${origin}${contextPath}${r._links.webui}` : '',
             excerpt: r.excerpt || (r.body?.view?.value ? r.body.view.value.slice(0, 200) : ''),
@@ -371,7 +380,7 @@ export async function inTabSearchConfluence({ query, space, limit = 5, strategy 
 
   // Strategy 2: REST v1 with simple text ~
   const cql2 = `${spaceClause}(text ~ "${q.replace(/["\\]/g, '')}")`;
-  const url2 = `${origin}${contextPath}/rest/api/content/search?cql=${encodeURIComponent(cql2)}&limit=${lim}`;
+  const url2 = `${origin}${contextPath}/rest/api/content/search?cql=${encodeURIComponent(cql2)}&limit=${lim}${expand}`;
   try {
     const res2 = await fetch(url2, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
     if (res2.ok) {
@@ -385,7 +394,7 @@ export async function inTabSearchConfluence({ query, space, limit = 5, strategy 
             id: r.id,
             title: r.title,
             type: r.type,
-            spaceKey: r.space?.key || '',
+            spaceKey: r.space?.key || spaceKeyFromLink(r._links?.webui),
             spaceName: r.space?.name || '',
             url: r._links?.webui ? `${origin}${contextPath}${r._links.webui}` : '',
             excerpt: r.excerpt || '',
@@ -623,7 +632,12 @@ export function confluenceTools(client = new ConfluenceClient()) {
             lines.push(`    excerpt: ${cleanExcerpt}`);
           }
         }
-        lines.push('\nTo view complete contents of a page, call: <copilot:confluence_read id="<id>"/>');
+        // Described, not demonstrated. A literal tag here is a tag in the
+        // conversation that the next extraction may read back as a call, and
+        // the placeholder id="<id>" parses perfectly into a request for a
+        // page called "<id>". The model already has the real form in its
+        // instructions.
+        lines.push('\nUse the confluence_read tool with one of the ids above to read a page in full.');
         return lines.join('\n');
       },
     },
