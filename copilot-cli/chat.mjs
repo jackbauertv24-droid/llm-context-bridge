@@ -24,10 +24,11 @@ import fs from 'node:fs';
 
 // Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
 // a previous build is otherwise indistinguishable from a fresh one.
-const VERSION = '2026-09-21.17';
+
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 import { askInPage } from './page-fn.mjs';
+import { VERSION } from './lib-version.mjs';
 import { createAgentSession, runAgent, defaultTools } from './lib-agent.mjs';
 import { resolveRoot, ToolError } from './lib-fstools.mjs';
 import { loadMailConfig, configComplaint, mailTools, readMail, listFolders, probeEwsSearch } from './lib-mailtool.mjs';

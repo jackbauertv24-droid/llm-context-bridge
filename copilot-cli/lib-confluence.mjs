@@ -13,6 +13,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CDP, getJson } from './lib-cdp.mjs';
+import { VERSION } from './lib-version.mjs';
 import { parseEnvFile } from './lib-mailtool.mjs';
 
 /** Error thrown for Confluence configuration or access problems */
@@ -192,11 +193,20 @@ export async function inTabProbeConfluence() {
 
       let body = null;
       let textSample = '';
+      let bodySample = '';
       if (ct.includes('json')) {
-        try { body = await res.json(); } catch (e) { textSample = `JSON parse failed: ${e.message}`; }
+        try {
+          body = await res.json();
+          // A refusal answers in JSON too, and its message is the whole
+          // point. Kept verbatim and bounded so the report can show it.
+          if (!res.ok) bodySample = JSON.stringify(body).slice(0, 1200);
+        } catch (e) { textSample = `JSON parse failed: ${e.message}`; }
       } else {
         const text = await res.text();
-        textSample = text.slice(0, 300);
+        // More of it when the request failed: an SSO redirect or a WAF block
+        // is recognisable from the first paragraph of HTML, not from 300
+        // characters of <head>.
+        textSample = text.slice(0, res.ok ? 300 : 1500);
       }
 
       return {
@@ -208,7 +218,10 @@ export async function inTabProbeConfluence() {
         contentType: ct,
         ms,
         ok: res.ok,
+        redirected: res.redirected,
+        finalUrl: res.url,
         body,
+        bodySample,
         textSample,
       };
     } catch (err) {
@@ -668,7 +681,10 @@ export async function runConfluenceCheck(args = []) {
   const outLines = [];
   const log = (msg = '') => { console.error(msg); outLines.push(msg); };
 
-  log(`copilot-cli — confluence check`);
+  // The build and runtime, for the same reason every other diagnostic
+  // carries them: a pasted report from an older build is otherwise
+  // indistinguishable from a fresh one.
+  log(`copilot-cli ${VERSION} — confluence check   (node ${process.version})`);
   log(`connecting to Chrome CDP on ${cfg.host}:${cfg.port}...`);
 
   let target, pages;
@@ -752,8 +768,18 @@ export async function runConfluenceCheck(args = []) {
         const hasBodyView = Boolean(a.body.body?.view?.value);
         log(`    body.view present: ${hasBodyView} (${hasBodyView ? a.body.body.view.value.length : 0} chars)`);
       }
-    } else if (a.textSample) {
+    } else if (a.textSample && a.ok) {
       log(`    Raw Text Sample: ${a.textSample.slice(0, 120).replace(/\s+/g, ' ')}...`);
+    }
+
+    // Everything known about a failure, because this is the run that has to
+    // explain itself. A redirect to a login page is the usual answer and is
+    // invisible without the final URL.
+    if (!a.ok) {
+      if (a.redirected || (a.finalUrl && a.finalUrl !== a.fullUrl)) log(`    Redirected to: ${a.finalUrl}`);
+      if (a.bodySample) log(`    Error body: ${a.bodySample}`);
+      else if (a.textSample) log(`    Response body (${a.textSample.length} chars shown): ${a.textSample.replace(/\s+/g, ' ')}`);
+      if (a.error) log(`    Threw: ${a.error}`);
     }
   }
 
