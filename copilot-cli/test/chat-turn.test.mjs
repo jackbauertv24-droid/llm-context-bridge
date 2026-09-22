@@ -56,10 +56,27 @@ const CFG = {
  *   strayStop      - a control matching the stop selector that is always there
  *   generating     - a real response in flight that never finishes
  *   deadEnter      - Enter does nothing; only the send button works
+ *   quiet          - no ambient churn; almost no real page is like this
+ *
+ * Ambient churn is on by DEFAULT and that is the point. Every real web app
+ * mutates constantly — a clock, a presence dot, a re-render — and the first
+ * replica sat perfectly still. A check for "is the page busy" that watched
+ * for any DOM mutation therefore passed every test here and blocked every
+ * message on the real page: a plain "hi" could not be sent at all, twice,
+ * across two builds each claimed as fixed. A replica that is quieter than
+ * reality does not test the thing that breaks.
  */
-function chatPage({ lexical = false, legacyKeypress = false, strayStop = false, generating = false, deadEnter = false } = {}) {
+function chatPage({ lexical = false, legacyKeypress = false, strayStop = false, generating = false, deadEnter = false, quiet = false } = {}) {
   resetDom();
   const state = { submits: 0, received: null };
+
+  if (!quiet) {
+    // The clock in the corner: constant mutation, no growth in text.
+    const clock = new El('div', { class: 'clock' });
+    doc.body.append(clock);
+    const ticking = setInterval(() => clock.setText(new Date().toISOString()), 200);
+    state.stopClock = () => clearInterval(ticking);
+  }
 
   const feed = new El('div', { role: 'feed' });
   doc.body.append(new El('div', { 'data-testid': 'MessageListContainer' })).append(feed);
@@ -120,6 +137,7 @@ async function turn(page, prompt = 'hi', extra = {}) {
     const state = chatPage(page);
     const res = await askInPage({ ...CFG, ...extra, prompt });
     if (state.stop) state.stop();
+    if (state.stopClock) state.stopClock();
     return { state, res };
   } finally { restore(); }
 }
@@ -175,6 +193,26 @@ test('a stray stop control does not hold the turn open to the answer timeout', a
   const { res } = await turn({ strayStop: true });
   assert.ok(Date.now() - started < 4000, `turn took ${Date.now() - started}ms`);
   assert.equal(res.debug.wait.strayStop, true);
+});
+
+test('a live page that merely ticks is not mistaken for one that is generating', async () => {
+  // OBSERVED on the real page, twice: "hi" was refused with "the page was
+  // still generating" while nothing had been sent and the page was idle.
+  // A stray stop control plus the ordinary churn of a live app was read as
+  // a response in flight. Generation grows the text; a clock does not.
+  const { state, res } = await turn({ strayStop: true });
+  assert.equal(res.notSent, undefined, 'a ticking idle page must not be refused');
+  assert.equal(state.submits, 1);
+  assert.equal(res.text, 'hello back');
+});
+
+test('a ticking page does not hold the turn open to the answer timeout', async () => {
+  // The same assumption in the second place: the wait for the answer ended
+  // on "the DOM went quiet", which on a ticking page is never.
+  const started = Date.now();
+  const { res } = await turn({ strayStop: true });
+  assert.ok(Date.now() - started < 4000, `turn took ${Date.now() - started}ms`);
+  assert.notEqual(res.debug.wait.via, 'timeout');
 });
 
 test('nothing is sent into a page that is still generating', async () => {

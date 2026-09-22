@@ -103,45 +103,63 @@ export async function askInPage(cfg) {
     } catch { return '(could not describe it)'; }
   };
 
-  // Activity during the wait, so the two cases can be told apart at all.
-  // Without this, a control that merely contains the word "stop" and is
-  // always on screen reads identically to a response in flight — and that
-  // refused to send anything at all, which is worse than the fault it was
-  // added to prevent.
-  let preLastMutation = Date.now();
-  let preObs = null;
-  try {
-    preObs = new MutationObserver(() => { preLastMutation = Date.now(); });
-    preObs.observe(document.body, { subtree: true, childList: true, characterData: true });
-  } catch { /* without it the quiet test below simply passes */ }
-  const stillMoving = () => Date.now() - preLastMutation < busyQuietMs;
+  // Is the page *generating*, as opposed to merely alive?
+  //
+  // The first attempt at this watched for any DOM mutation, which was
+  // useless: every real web app mutates constantly — a clock, a presence
+  // dot, a re-render — so the page always looked busy, nothing was ever
+  // sent, and a plain "hi" could not get out. The replica used to check it
+  // sat perfectly still, which is why the fault survived being "fixed".
+  //
+  // Generation has one signature that ambient churn does not: the page
+  // gains text, and keeps gaining it. A ticking clock rewrites a few
+  // characters without growing; an answer being written adds hundreds.
+  const bodyChars = () => {
+    try { return (document.body.innerText || '').length; } catch { return 0; }
+  };
+  const growthChars = Number(cfg.growthChars || 20);
+  let lastChars = bodyChars();
+  let lastGrowth = Date.now();
 
   const preflightStart = Date.now();
   let preflightLogged = false;
   const firstStop = stopNow();
-  while (stopNow() && stillMoving() && (Date.now() - preflightStart < preflightLimit)) {
-    if (!preflightLogged) {
-      log(`a response looks to be in flight; waiting. Stop control: ${describeStop(stopNow())}`);
-      preflightLogged = true;
+
+  if (preflightLimit > 0) {
+    for (;;) {
+      if (!stopNow()) break;                       // no busy control at all
+      if (Date.now() - preflightStart >= preflightLimit) break;
+
+      const now = bodyChars();
+      if (now - lastChars >= growthChars) lastGrowth = Date.now();
+      lastChars = now;
+
+      // Still there, but the page has stopped growing: it is not writing an
+      // answer, whatever the control looks like.
+      if (Date.now() - lastGrowth >= busyQuietMs) break;
+
+      if (!preflightLogged) {
+        log(`text is still growing and a stop control is visible; waiting. ${describeStop(stopNow())}`);
+        preflightLogged = true;
+      }
+      await sleep(400);
     }
-    await sleep(500);
   }
+
   const preflightMs = Date.now() - preflightStart;
   const stopStillThere = !!stopNow();
-  const preflightTimedOut = preflightMs >= preflightLimit;
-  try { if (preObs) preObs.disconnect(); } catch { /* going away anyway */ }
+  const stillGrowing = Date.now() - lastGrowth < busyQuietMs;
+  const preflightTimedOut = preflightLimit > 0 && preflightMs >= preflightLimit;
 
-  if (preflightMs > 200) log(`waited ${preflightMs}ms for the page to go idle`);
-  if (firstStop && stopStillThere && !stillMoving()) {
-    // Present, but the page has not moved. This is the case that blocked a
-    // plain "hi" from being sent at all.
-    log(`a control matches the stop selector but the page has been still for `
-      + `${Date.now() - preLastMutation}ms, so it is not generating: ${describeStop(stopStillThere ? stopNow() : null)}`);
-    log('if this is wrong, pin the real one with STOP_SELECTOR');
+  if (firstStop && stopStillThere && !stillGrowing) {
+    log(`a control matches the stop selector but the page has not gained text `
+      + `for ${Date.now() - lastGrowth}ms, so it is not generating: ${describeStop(stopNow())}`);
+    log('if that is the real stop control, pin it with STOP_SELECTOR');
   }
   debug.stopControl = { matched: !!firstStop, description: describeStop(firstStop), stillThere: stopStillThere };
 
-  if (preflightTimedOut && stopStillThere && stillMoving()) {
+  if (preflightMs > 200) log(`waited ${preflightMs}ms for the page to go idle`);
+  if (preflightTimedOut && stopStillThere && stillGrowing) {
     // Still working after the full wait. Refuse, and say so: the caller can
     // stop, and nothing was added to the conversation.
     log(`the page was still generating after ${preflightMs}ms; refusing to send`);
@@ -151,7 +169,8 @@ export async function askInPage(cfg) {
       busy: true,
       notSent: true,
       text: '',
-      method: 'not sent: the page was still generating a previous response',
+      method: 'not sent: the page was still generating a previous response'
+        + ' (set PREFLIGHT_MS=0 to send without this check)',
       debug,
     };
   }
@@ -527,6 +546,17 @@ export async function askInPage(cfg) {
       const newBlock = answerBlocks().some((el) => !baseSet.has(el));
       const grew = newBlock || document.body.innerText.length > bodyBaseLen + cfg.prompt.length + 20;
 
+      // Finished is "the text stopped growing", not "the DOM stopped
+      // changing". A page with a clock in the corner never stops changing,
+      // so the quiet rule below never fired and every turn ran to the full
+      // answer timeout — two minutes, on a page that had answered in three
+      // seconds. Growth is what an answer being written produces and what
+      // ambient churn does not.
+      const chars = bodyChars();
+      if (chars - lastChars >= growthChars) lastGrowth = Date.now();
+      lastChars = Math.max(lastChars, chars);
+      const sinceGrowth = Date.now() - lastGrowth;
+
       // A control that was already on screen before we sent anything cannot
       // be telling us about the answer we just asked for. Trusting it meant
       // that on a page carrying a permanent one — "Stop sharing", say — the
@@ -541,7 +571,7 @@ export async function askInPage(cfg) {
       const finished = trustStop && wait.sawStop && goneFor >= TICK * 2;
       // The fallback, used whenever there is no trustworthy busy signal —
       // either none was ever seen, or the one on screen was already there.
-      const quiet = (strayStop || !wait.sawStop) && Date.now() - lastMutation > cfg.quietMs;
+      const quiet = (strayStop || !wait.sawStop) && sinceGrowth > cfg.quietMs;
       // And a safety net: a stop control that is still there long after the
       // page stopped changing is stale, not generating. Without this the turn
       // would sit until the answer timeout -- two minutes for a page that
@@ -553,7 +583,7 @@ export async function askInPage(cfg) {
       // was cut off and its half-written reply taken as final. Thirty
       // seconds of complete silence is stuck; five is slow.
       const staleAfter = Math.max(cfg.quietMs * 3, 30000);
-      const stale = trustStop && wait.sawStop && Date.now() - lastMutation > staleAfter;
+      const stale = trustStop && wait.sawStop && sinceGrowth > staleAfter;
 
       if (grew && (finished || quiet || stale)) {
         wait.via = finished ? 'stop-control-gone' : stale ? 'stale-stop-control' : 'quiet';
@@ -564,7 +594,7 @@ export async function askInPage(cfg) {
 
       // Short-circuit: If after 8 seconds no generation ever started and prompt text remains in input,
       // the send failed to trigger. Do not freeze the terminal for 120 seconds!
-      if (!wait.sawStop && !grew && hasText() && (Date.now() - sentAt > 8000)) {
+      if (!grew && hasText() && (Date.now() - sentAt > 8000)) {
         wait.via = 'send-not-triggered';
         wait.ms = Date.now() - sentAt;
         clearInterval(iv); resolve();
