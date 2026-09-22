@@ -160,6 +160,11 @@ test('confluenceHtmlToText converts HTML into clean markdown', () => {
   assert.doesNotMatch(md, /alert/);
 });
 
+// The confluence skill now reports itself unavailable until it is configured,
+// so these tests say so explicitly rather than relying on it always claiming
+// to be ready. CONFLUENCE_TAB_MATCH is what a real setup would set.
+process.env.CONFLUENCE_TAB_MATCH = process.env.CONFLUENCE_TAB_MATCH || 'confluence';
+
 test('SkillRegistry resolves confluence and wiki aliases', () => {
   const reg = createDefaultRegistry();
   for (const alias of ['confluence', 'wiki', 'doc', 'docs']) {

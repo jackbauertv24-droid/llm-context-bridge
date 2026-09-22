@@ -75,14 +75,28 @@ export async function askInPage(cfg) {
   };
 
   const preflightStart = Date.now();
+  let preflightLogged = false;
   while (stopNow() && (Date.now() - preflightStart < 30000)) {
-    log('waiting for previous response to finish streaming...');
+    // Logged once rather than sixty times, and the total is recorded below:
+    // a stop control that is stuck visible costs this wait on every single
+    // turn, and that needs to be visible in the diagnostics rather than felt
+    // as unexplained slowness.
+    if (!preflightLogged) { log('a previous response is still streaming; waiting for it'); preflightLogged = true; }
     await sleep(500);
+  }
+  const preflightMs = Date.now() - preflightStart;
+  const preflightTimedOut = preflightMs >= 30000;
+  if (preflightMs > 200) {
+    log(`waited ${preflightMs}ms before sending${preflightTimedOut
+      ? ' and gave up: the stop control never went away, so it may be stale rather than streaming'
+      : ''}`);
   }
   const inputReadyStart = Date.now();
   while ((input.disabled || input.getAttribute('aria-disabled') === 'true') && (Date.now() - inputReadyStart < 10000)) {
     await sleep(300);
   }
+  const inputWaitMs = Date.now() - inputReadyStart;
+  if (inputWaitMs > 200) log(`input was disabled for ${inputWaitMs}ms before it accepted text`);
 
   // 3. set text
   input.focus();
@@ -169,7 +183,7 @@ export async function askInPage(cfg) {
   // Visibility is checked, not just presence: a stop control left in the DOM
   // but hidden would otherwise read as "still generating" until the timeout.
   const TICK = 100;
-  const wait = { via: 'timeout', sawStop: false, ms: 0, selector: stopSelector };
+  const wait = { via: 'timeout', sawStop: false, ms: 0, selector: stopSelector, preflightMs, preflightTimedOut, inputWaitMs };
   let goneFor = 0;
 
   // Send attempt 1: Enter

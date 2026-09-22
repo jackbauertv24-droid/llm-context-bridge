@@ -214,7 +214,8 @@ async function readMailEws(cfg, { days, folder, limit, args }) {
     subject: args.subject,
   });
 
-  const full = await ews.getItems(found.slice(0, limit));
+  const wanted = found.slice(0, limit);
+  const full = await ews.getItems(wanted);
   const messages = [];
   let spent = 0;
   let truncatedAt = 0;
@@ -224,12 +225,53 @@ async function readMailEws(cfg, { days, folder, limit, args }) {
     spent += cost;
     messages.push(m);
   }
+
+  // Every stage, counted. An empty answer has several possible causes that
+  // used to look identical from outside — the server matched nothing, the
+  // search matched but the listing would not parse, the listing parsed but
+  // the bodies would not, or the size budget dropped everything — and each
+  // needs a different fix. The counts say which, without another run.
+  const stages = {
+    folder,
+    since: since.toISOString(),
+    windowDays: days,
+    findItem: { matched: found.totalInView, messageBlocks: found.rawBlocks, parsed: found.length },
+    getItem: { requested: wanted.length, parsed: full.length, withBody: full.filter((m) => m.text).length },
+    budget: { kept: messages.length, truncatedAt, perMessageChars: cfg.perMessageChars, totalChars: cfg.totalChars },
+  };
+  stages.diagnosis = diagnoseStages(stages);
+
   return {
     text: renderDigest(messages, { folder, days, truncatedAt, cfg }),
     count: messages.length,
     folder,
     commands: ews.log,
+    stages,
+    trace: ews.trace,
+    raw: ews.raw,
   };
+}
+
+/** Which stage lost the messages, in one sentence. */
+export function diagnoseStages(st) {
+  const f = st.findItem || {};
+  const g = st.getItem || {};
+  if ((f.matched || 0) === 0 && (f.messageBlocks || 0) === 0) {
+    return `the server matched nothing in ${st.folder} since ${st.since} — the mailbox, folder or window is the question, not the client`;
+  }
+  if ((f.messageBlocks || 0) > 0 && (f.parsed || 0) === 0) {
+    return `FindItem returned ${f.messageBlocks} message element(s) and none parsed — a client bug; the raw response is attached`;
+  }
+  if ((f.parsed || 0) > 0 && (g.requested || 0) > 0 && (g.parsed || 0) === 0) {
+    return `the listing parsed ${f.parsed} message(s) but GetItem yielded none — a client bug in the body fetch; the raw response is attached`;
+  }
+  if ((g.parsed || 0) > 0 && (g.withBody || 0) === 0) {
+    return `${g.parsed} message(s) came back with no readable body — check BodyType handling; the raw response is attached`;
+  }
+  if ((g.parsed || 0) > 0 && (st.budget || {}).kept === 0) {
+    return `${g.parsed} message(s) were fetched and the size budget dropped all of them — raise MAIL_MAX_TOTAL`;
+  }
+  return null;
 }
 
 /**
@@ -361,7 +403,7 @@ export async function probeEwsSearch(cfg, { days }) {
  * loop treats them identically. `mutates` is false for both: reading mail
  * changes nothing, which is the entire design constraint.
  */
-export function mailTools(cfg) {
+export function mailTools(cfg, { onRead = null } = {}) {
   return {
     mail: {
       summary: 'read recent mail messages',
@@ -376,8 +418,19 @@ export function mailTools(cfg) {
       },
       mutates: false,
       async run(_ctx, a) {
-        const res = await readMail(cfg, a);
-        return res.text;
+        let res;
+        try {
+          res = await readMail(cfg, a);
+        } catch (e) {
+          // A failed read is the one worth recording most. Without this an
+          // agent run leaves nothing behind to explain what went wrong.
+          if (onRead) { try { onRead({ error: e.message, args: a }); } catch { /* never fail a turn over diagnostics */ } }
+          throw e;
+        }
+        if (onRead) { try { onRead({ ...res, args: a }); } catch { /* as above */ } }
+        return res.stages && res.stages.diagnosis
+          ? `${res.text}\n\n[bridge] ${res.stages.diagnosis}`
+          : res.text;
       },
     },
 

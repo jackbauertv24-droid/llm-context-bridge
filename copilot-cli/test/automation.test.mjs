@@ -225,6 +225,11 @@ test('confluence tools conform to copilot-cli protocol and are strictly read-onl
   }
 });
 
+// The confluence skill reports itself unavailable until configured, so this
+// test states the configuration rather than relying on it always claiming to
+// be ready.
+process.env.CONFLUENCE_TAB_MATCH = process.env.CONFLUENCE_TAB_MATCH || 'confluence';
+
 test('renderSystemPrompt for confluence skill generates safe read-only persona and rules', () => {
   const reg = createDefaultRegistry();
   const res = reg.resolve('confluence', { root: '/repo' });

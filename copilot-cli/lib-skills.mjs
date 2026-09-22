@@ -55,7 +55,10 @@ export const mailSkill = {
     const cfg = ctx.mailConfig || loadMailConfig({ root: ctx.root, envPath: ctx.mailEnv });
     if (cfg && cfg.configured) {
       const proto = (cfg.protocol || 'ews').toUpperCase();
-      return { available: true, detail: `${cfg.user} at ${cfg.host} (${proto})` };
+      // EWS has no cfg.host — it is configured by URL — so reading host here
+      // printed "user at undefined (EWS)" on the line that confirms setup.
+      const where = cfg.protocol === 'ews' ? cfg.ewsUrl : cfg.host;
+      return { available: true, detail: `${cfg.user} at ${where} (${proto})` };
     }
     return {
       available: false,
@@ -64,7 +67,9 @@ export const mailSkill = {
   },
   getTools: (ctx = {}) => {
     const cfg = ctx.mailConfig || loadMailConfig({ root: ctx.root, envPath: ctx.mailEnv });
-    return mailTools(cfg);
+    // ctx.onMailRead lets the CLI record every read to disk without this
+    // module doing file I/O of its own.
+    return mailTools(cfg, { onRead: ctx.onMailRead || null });
   },
   promptRules: [],
 };
@@ -107,10 +112,25 @@ export const confluenceSkill = {
   summary: 'Search and read corporate Confluence articles and knowledge base via authenticated Chrome tab.',
   mutates: false,
   sampleTag: '<copilot:confluence_search query="architecture overview"/>',
-  isAvailable: () => ({
-    available: true,
-    detail: 'requires authenticated Confluence tab in Chrome (port 9222)',
-  }),
+  // Availability has to mean something. Returning true unconditionally put
+  // three tools in front of the model on every --skills all run, configured
+  // or not, which is exactly what this module exists to avoid: a tool that
+  // always fails teaches the model to keep trying it. Configuration can be
+  // checked here; whether the tab is actually open and signed in can only be
+  // found out at call time, so that stays as a caveat rather than a claim.
+  isAvailable: (ctx = {}) => {
+    const cfg = loadConfluenceConfig({ root: ctx.root });
+    if (!cfg.configured) {
+      return {
+        available: false,
+        reason: 'confluence is not configured (copy confluence.env.example to confluence.env)',
+      };
+    }
+    return {
+      available: true,
+      detail: `tab matching "${cfg.tabMatch}" — needs that tab open and signed in`,
+    };
+  },
   getTools: (ctx = {}) => {
     const client = ctx.confluenceClient || new ConfluenceClient(loadConfluenceConfig({ root: ctx.root }));
     if (ctx && !ctx.confluenceClient) ctx.confluenceClient = client;

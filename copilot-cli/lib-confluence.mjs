@@ -97,6 +97,11 @@ export function loadConfluenceConfig({ root, envPath, env = process.env } = {}) 
     tabMatch: get('CONFLUENCE_TAB_MATCH', 'confluence'),
     maxChars: Number(get('CONFLUENCE_MAX_CHARS', 25000)),
     timeoutMs: Number(get('CONFLUENCE_TIMEOUT_MS', 20000)),
+    // Someone has said they want this: either a confluence.env exists, or a
+    // tab match was given explicitly. Defaults alone do not count, or the
+    // skill would offer itself on every machine whether or not Confluence is
+    // reachable, which is what it is meant to prevent.
+    configured: !!source || !!(env.CONFLUENCE_TAB_MATCH || fromFile.CONFLUENCE_TAB_MATCH),
   };
 }
 

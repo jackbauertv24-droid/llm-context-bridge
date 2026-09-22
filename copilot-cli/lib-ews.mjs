@@ -156,6 +156,14 @@ export class EwsReader {
     // auto: try Basic, and switch to NTLM if the server will not take it.
     this.authMode = (opts.authMode || 'auto').toLowerCase();
     this.agent = null;
+    // One entry per operation: what was asked, what came back, how long it
+    // took, and how much of it we managed to read. This is what turns "no
+    // mail" into a diagnosis instead of a guess.
+    this.trace = [];
+    // The raw XML, kept so a parsing failure can be seen rather than
+    // inferred. Bounded, and only written out when something looks wrong.
+    this.keepRaw = opts.keepRaw !== false;
+    this.raw = [];
   }
 
   /**
@@ -269,7 +277,21 @@ export class EwsReader {
 </soap:Envelope>`;
 
     const url = new URL(this.opts.url);
+    const startedAt = Date.now();
     const res = await this.#authorizedPost(url, envelope);
+    const entry = {
+      op: operation,
+      status: res.status,
+      ms: Date.now() - startedAt,
+      bytes: res.body ? res.body.length : 0,
+      auth: this.authMode,
+    };
+    this.trace.push(entry);
+    this.lastEntry = entry;
+    if (this.keepRaw) {
+      this.raw.push({ op: operation, request: body.slice(0, 4000), response: (res.body || '').slice(0, 200000) });
+      if (this.raw.length > 6) this.raw.shift();
+    }
 
     if (res.status === 401) {
       const scheme = String(res.headers['www-authenticate'] || '');
@@ -423,6 +445,7 @@ export class EwsReader {
     }
     items.totalInView = totalInView;
     items.rawBlocks = rawBlocks;
+    if (this.lastEntry) Object.assign(this.lastEntry, { matched: totalInView, messageBlocks: rawBlocks, parsed: items.length });
     return items;
   }
 
@@ -470,6 +493,7 @@ export class EwsReader {
     };
 
     const out = [];
+    const messageBlocks = blocks(xml, 'Message').length;
     for (const msg of blocks(xml, 'Message')) {
       const sender = blocks(msg.inner, 'From')[0];
       out.push({
@@ -487,6 +511,12 @@ export class EwsReader {
         isRead: text(msg.inner, 'IsRead') === 'true',
         hasAttachments: text(msg.inner, 'HasAttachments') === 'true',
         text: text(msg.inner, 'Body').trim(),
+      });
+    }
+    if (this.lastEntry) {
+      Object.assign(this.lastEntry, {
+        requested: items.length, messageBlocks, parsed: out.length,
+        withBody: out.filter((m) => m.text).length,
       });
     }
     return out;

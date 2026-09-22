@@ -24,7 +24,7 @@ import fs from 'node:fs';
 
 // Stamped into every diagnostic, because a stale copilot-cli-lastturn.txt from
 // a previous build is otherwise indistinguishable from a fresh one.
-const VERSION = '2026-09-21.16';
+const VERSION = '2026-09-21.17';
 import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 import { askInPage } from './page-fn.mjs';
@@ -308,7 +308,15 @@ async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv, 
 
   let resolved;
   try {
-    const resolveCtx = { root: sess.root, mailEnv, confluenceClient: sess.confluenceClient };
+    const mailCfgForRun = loadMailConfig({ root: sess.root, envPath: mailEnv });
+    const resolveCtx = {
+      root: sess.root,
+      mailEnv,
+      confluenceClient: sess.confluenceClient,
+      // Every mail read the agent performs leaves a full report behind, so a
+      // disappointing agent run does not have to be repeated to be explained.
+      onMailRead: (res) => writeMailDiagnostics(mailCfgForRun, res),
+    };
     resolved = registry.resolve(skillName, resolveCtx);
     if (resolveCtx.confluenceClient && !sess.confluenceClient) {
       sess.confluenceClient = resolveCtx.confluenceClient;
@@ -409,6 +417,50 @@ async function describeCertificate(urlString) {
   });
 }
 
+/**
+ * Everything one mail read did, on disk.
+ *
+ * A read that comes back empty during an agent run used to leave nothing
+ * behind at all, so the only way to find out why was to run it again with a
+ * different guess. This writes the stage counts, the operations sent and the
+ * timings every time — and, when a stage lost messages it should not have,
+ * the raw XML that proves where. That file plus copilot-cli-lastturn.txt is
+ * intended to be the whole story.
+ *
+ * It holds real mail, so it sits beside the other diagnostics in the working
+ * directory and is gitignored.
+ */
+function writeMailDiagnostics(cfg, res) {
+  try {
+    const suspect = !!(res.stages && res.stages.diagnosis);
+    const report = {
+      version: VERSION,
+      when: new Date().toISOString(),
+      node: process.version,
+      config: {
+        protocol: cfg.protocol,
+        endpoint: cfg.protocol === 'ews' ? cfg.ewsUrl : `${cfg.host}:${cfg.port}`,
+        user: cfg.user,
+        authMode: cfg.authMode,
+        domain: cfg.domain || null,
+        folder: cfg.folder,
+        tlsVerification: cfg.insecureTls ? 'off' : 'on',
+        redact: cfg.redact,
+        source: cfg.source,
+      },
+      args: res.args || null,
+      error: res.error || null,
+      stages: res.stages || null,
+      operations: res.commands || [],
+      trace: res.trace || [],
+      // Only when a stage lost something: this is mail content, and there is
+      // no reason to keep a copy of a run that worked.
+      raw: suspect || res.error ? (res.raw || []) : undefined,
+    };
+    fs.writeFileSync('copilot-cli-mail-last.json', JSON.stringify(report, null, 1) + '\n');
+  } catch { /* diagnostics must never break a turn */ }
+}
+
 async function runMailCheck(args) {
   const mailEnv = takeFlag(args, '--mail-env');
   const rootArg = takeFlag(args, '--root');
@@ -466,6 +518,18 @@ async function runMailCheck(args) {
     say(res.text);
     say('--- end ---');
     gotMessage = res.count > 0;
+    writeMailDiagnostics(cfg, res);
+    if (res.stages) {
+      const st = res.stages;
+      say('');
+      say('stage by stage:');
+      say(`  window:   ${st.windowDays} day(s), since ${st.since}`);
+      say(`  FindItem: server matched ${st.findItem.matched === null ? '?' : st.findItem.matched}, `
+        + `${st.findItem.messageBlocks} message element(s) in the reply, ${st.findItem.parsed} parsed`);
+      say(`  GetItem:  ${st.getItem.requested} requested, ${st.getItem.parsed} parsed, ${st.getItem.withBody} with a body`);
+      say(`  budget:   ${st.budget.kept} kept${st.budget.truncatedAt ? ` (cut at ${st.budget.truncatedAt})` : ''}`);
+      if (st.diagnosis) say(`  DIAGNOSIS: ${st.diagnosis}`);
+    }
 
     // Nothing found is a result that needs explaining, not reporting. Ask
     // the server the same question three ways, in this same run, so the
@@ -499,6 +563,7 @@ async function runMailCheck(args) {
   } catch (e) {
     ok = false;
     say(`FAILED: ${e.message}`);
+    writeMailDiagnostics(cfg, { error: e.message, commands });
     // A trust failure is the one error where the next step depends on a fact
     // only the server can supply: which authority signed its certificate.
     // Fetching that here means the fix does not cost another round trip.
@@ -525,7 +590,8 @@ async function runMailCheck(args) {
   try {
     fs.writeFileSync('copilot-cli-mailcheck.txt', lines.join('\n') + '\n');
     note('');
-    note('[mail] written to copilot-cli-mailcheck.txt — that file is the whole report.');
+    note('[mail] written to copilot-cli-mailcheck.txt and copilot-cli-mail-last.json.');
+    note('[mail] those two together are the whole report — no second run needed to explain this one.');
     if (gotMessage) note('[mail] it contains one real message; redact it before sharing if you need to.');
   } catch { /* the report on screen is the important one */ }
   return ok;
