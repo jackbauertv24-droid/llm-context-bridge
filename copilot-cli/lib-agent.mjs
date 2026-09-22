@@ -45,11 +45,17 @@ const NS = 'copilot';
 // bridge dutifully offers to edit the file. Reviewing a file that contains the
 // protocol — this repository, for one — does the same. A tag is an action; a
 // mention of a tag is prose, and column zero is what separates them.
-const OPEN = new RegExp(`^<${NS}:([a-z]+)((?:\\s+[a-z_]+\\s*=\\s*(?:"[^"]*"|'[^']*'))*)\\s*(/?)>`, 'gm');
+// The tag name allows underscores and digits. It did not, and the confluence
+// tools are called confluence_search, confluence_read and confluence_spaces:
+// the model emitted them perfectly and the parser could not see them, so the
+// turn ended as prose with the tag printed to the terminal. A tool name the
+// grammar cannot express is checked for at startup now — see assertToolNames.
+const TAG_NAME = '[a-z][a-z0-9_]*';
+const OPEN = new RegExp(`^<${NS}:(${TAG_NAME})((?:\\s+[a-z_]+\\s*=\\s*(?:"[^"]*"|'[^']*'))*)\\s*(/?)>`, 'gm');
 
 // Tag-shaped text that is NOT a call, so the user can be told when something
 // that looked like one was passed over rather than silently dropped.
-const MENTION = new RegExp(`<${NS}:[a-z]+`, 'g');
+const MENTION = new RegExp(`<${NS}:${TAG_NAME}`, 'g');
 
 export function countMentions(text) {
   const src = stripFences(text);
@@ -63,7 +69,26 @@ export function countMentions(text) {
 
 // ---------------------------------------------------------------- protocol
 
+/**
+ * A tool whose name the tag grammar cannot express can never be called: the
+ * model emits it correctly, the parser skips it, and the turn quietly ends.
+ * That is invisible from the outside, so it is checked before a prompt is
+ * ever built rather than discovered by running one.
+ */
+export function assertToolNames(tools) {
+  const valid = new RegExp(`^${TAG_NAME}$`);
+  const bad = Object.keys(tools || {}).filter((n) => !valid.test(n));
+  if (bad.length) {
+    throw new Error(
+      `these tool names cannot be expressed as tags and would never be called: ${bad.join(', ')}. `
+      + `Tag names must match ${TAG_NAME}.`,
+    );
+  }
+  return true;
+}
+
 export function renderSystemPrompt(root, tools = defaultTools, { skills = null } = {}) {
+  assertToolNames(tools);
   const activeSkills = skills && skills.length ? skills : null;
   const anyMutates = activeSkills
     ? activeSkills.some((s) => s.mutates)
@@ -248,7 +273,23 @@ export function proseOf(text) {
   const src = stripFences(text);
   OPEN.lastIndex = 0;
   const m = OPEN.exec(src);
-  return (m ? src.slice(0, m.index) : src).trim();
+  let prose = (m ? src.slice(0, m.index) : src).trim();
+  // Copilot renders a code block with a language caption and a line-number
+  // gutter, and innerText hands both back as text. Immediately before a tag
+  // they are chrome, not something the model said.
+  if (m) {
+    const lines = prose.split('\n');
+    while (lines.length) {
+      const last = lines[lines.length - 1].trim();
+      if (/^\d+$/.test(last) || /^(plain ?text|text|xml|html|markdown|code|bash|shell|json|yaml)$/i.test(last) || last === '') {
+        lines.pop();
+        continue;
+      }
+      break;
+    }
+    prose = lines.join('\n').trim();
+  }
+  return prose;
 }
 
 // Feeds results back as the next turn's prompt. Same tag shape as the calls, so
