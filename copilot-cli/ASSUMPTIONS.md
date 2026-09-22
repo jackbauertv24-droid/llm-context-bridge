@@ -34,7 +34,7 @@ Evidence has three strengths:
 | 5 | The page gains text while generating and not otherwise | RECORDED — `idle.charGrowth: 0` against `timeline` growth of 24–68 chars | recording | **yes**, with 4 |
 | 6 | The stop control vanishes *before* the answer is complete | RECORDED — gone at 4237ms, text still growing at 5239ms | recording | no — it extends the wait |
 | 7 | The editor pads typed text with invisible anchors | RECORDED — `insert.askedChars: 4`, `gotLength: 6` | recording | no |
-| 8 | The editor strips markdown markers from what is typed | RECORDED — `--record --as-agent`: 14 bullets, 4 headings, 2 fences, delta −44 against 42 accounted for | recording | no |
+| 8 | The composer returns fewer characters than were typed, for a long structured prompt | OBSERVED — 2584 back from 2624 sent. **The mechanism is not established**: stripped markdown markers predicts 42, lines joined with no separator predicts 52, and neither is 40 | symptom | no — and nothing depends on knowing which |
 | 9 | Text arriving twice over means it was inserted twice | OBSERVED — "Blast" sent as "BlastBlast" | symptom | **yes** — the only unambiguous corruption |
 | 10 | An empty composer means nothing would be sent | trivially true | — | **yes** |
 | 11 | A page with handlers on both keydown and keypress would submit twice | GUESSED | reasoning | no — it only suppresses a redundant event |
@@ -58,6 +58,23 @@ trivially true:
 
 Nothing GUESSED blocks anything. If that stops being true, the thing to do is
 record, not to reason further.
+
+## Assumption 8 is still a guess, and it no longer matters
+
+Two mechanisms explain the missing characters and neither matches exactly.
+Stripping "- ", "# " and fence markers accounts for 42. Running the lines
+together with no separator at all — which an earlier paste of this page
+plainly showed, "executesfor you" — accounts for 52. The observed figure is
+40.
+
+It was stated as settled arithmetic. It is not, and saying so was the same
+mistake that produced every other entry here.
+
+What matters is that the code no longer needs the answer. The comparison
+tolerates any reduction and refuses only an empty box or text that plainly
+arrived twice, so whichever mechanism it turns out to be, the send is not
+blocked by it. That is the better fix than identifying the cause: remove the
+dependency on the unknown rather than keep guessing at it.
 
 ## Why assumption 8 was missed
 
