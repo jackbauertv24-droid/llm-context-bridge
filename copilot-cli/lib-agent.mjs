@@ -79,6 +79,8 @@ export function renderSystemPrompt(root, tools = defaultTools, { skills = null }
     if (!hasCode) {
       if (activeSkills.length === 1 && activeSkills[0].id === 'mail') {
         roleDesc = "You are an assistant with read-only access to the user's corporate mail.";
+      } else if (activeSkills.length === 1 && activeSkills[0].id === 'confluence') {
+        roleDesc = "You are an assistant with read-only access to the corporate Confluence knowledge base.";
       } else {
         roleDesc = "You are an assistant with access to specific tools on the user's machine.";
       }

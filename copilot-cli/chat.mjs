@@ -181,6 +181,11 @@ async function askPage(cdp, full) {
     note('[bridge] if it is still wrong, that one file is the whole bug report — no second attempt needed.');
   }
   if (!res.ok) { note('[bridge] could not locate the input box. Run node probe.mjs and share the report.'); return null; }
+  if (res.debug && res.debug.wait && res.debug.wait.via === 'send-not-triggered') {
+    note('[bridge] the send button could not be automatically triggered; prompt remains in the chat box.');
+    note('[bridge] click Send or press Ctrl+Enter in Chrome to send, or run node probe.mjs to inspect selectors.');
+    return null;
+  }
   if (!res.text) {
     note('[bridge] sent, but extracted no answer text.');
     note('[bridge] node chat.mjs --replay copilot-cli-capture.json shows what was on the page and why each candidate lost.');

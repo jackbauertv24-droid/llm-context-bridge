@@ -74,6 +74,9 @@ export async function askInPage(cfg) {
     if (!input.innerText.trim()) { input.textContent = cfg.prompt; }
     // Ensure React/Lexical/ProseMirror registers the text insertion and updates character count / send button state
     try {
+      input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: cfg.prompt }));
+    } catch { /* ignore if unsupported */ }
+    try {
       input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
     } catch {
       input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -84,7 +87,7 @@ export async function askInPage(cfg) {
     setter.call(input, cfg.prompt);
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
-  await sleep(60);
+  await sleep(100);
   log(`text set, input now holds ${(input.value || input.innerText || '').length} chars`);
 
   const answerBlocks = () => {
@@ -159,72 +162,148 @@ export async function askInPage(cfg) {
     if (stopNow()) { wait.sawStop = true; goneFor = 0; } else { goneFor += TICK; }
   }, TICK);
 
+  const inputRect = typeof input.getBoundingClientRect === 'function' ? input.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0 };
+  const composer = (typeof input.closest === 'function' && (input.closest('form, [role="region"], [class*="composer" i], [class*="chat-input" i], [data-testid*="composer" i]')
+    || input.parentElement?.parentElement?.parentElement
+    || input.parentElement?.parentElement))
+    || input.parentElement;
+
+  const describeBtn = (btn) => {
+    const aria = btn.getAttribute('aria-label') || '';
+    const title = btn.getAttribute('title') || '';
+    const testid = btn.getAttribute('data-testid') || btn.getAttribute('data-test-id') || '';
+    const id = btn.id || '';
+    const text = btn.innerText || btn.textContent || '';
+    let innerAria = '';
+    let innerTitle = '';
+    try {
+      innerAria = btn.querySelector('[aria-label]')?.getAttribute('aria-label') || '';
+      innerTitle = btn.querySelector('title')?.textContent || '';
+    } catch { /* ignore */ }
+    const full = `${aria} ${title} ${testid} ${id} ${text} ${innerAria} ${innerTitle}`.toLowerCase();
+    const isNeg = /feedback|report|help|attach|file|upload|voice|mic|audio|cancel|dismiss|close|clear|delete|history|menu|settings|expand|collapse/i.test(full);
+    const isPos = /send|submit|ask|arrow/i.test(full) || btn.type === 'submit' || btn.getAttribute('type') === 'submit';
+    const r = typeof btn.getBoundingClientRect === 'function' ? btn.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0 };
+    const near = r.y >= (inputRect.y - 120) && r.y <= (inputRect.y + inputRect.height + 350);
+    return { btn, full, isNeg, isPos, near, r };
+  };
+
   const findSendButton = () => {
+    // Priority 1: Explicit pinned selector
     if (cfg.sendSelector) {
       try {
         const el = document.querySelector(cfg.sendSelector);
         if (el && vis(el)) return el;
       } catch { /* malformed override fallback */ }
     }
-    return [...document.querySelectorAll('button, [role="button"]')].filter(vis).find((el) => {
-      const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`.toLowerCase();
-      return /send|submit/.test(label);
-    });
+
+    // Priority 2: Look inside composer first (closest to input, ignores header buttons like "Send feedback")
+    if (composer && typeof composer.querySelectorAll === 'function') {
+      const composerButtons = [...composer.querySelectorAll('button, [role="button"]')].filter(vis).map(describeBtn);
+      const pos = composerButtons.find((d) => d.isPos && !d.isNeg);
+      if (pos) return pos.btn;
+
+      const sub = composerButtons.find((d) => (d.btn.type === 'submit' || d.btn.getAttribute('type') === 'submit') && !d.isNeg);
+      if (sub) return sub.btn;
+
+      const nonNeg = composerButtons.filter((d) => !d.isNeg && d.btn !== input);
+      if (nonNeg.length === 1) return nonNeg[0].btn;
+      if (nonNeg.length > 1) {
+        // Submit button is usually rightmost / bottommost in the composer
+        nonNeg.sort((a, b) => (b.r.x + b.r.y) - (a.r.x + a.r.y));
+        return nonNeg[0].btn;
+      }
+    }
+
+    // Priority 3: Document-wide search: MUST be near the input box and NOT negative
+    const allButtons = [...document.querySelectorAll('button, [role="button"]')].filter(vis).map(describeBtn);
+    const nearPos = allButtons.find((d) => d.near && d.isPos && !d.isNeg);
+    if (nearPos) return nearPos.btn;
+
+    // Priority 4: Any button in the lower half of viewport matching positive
+    const lowerPos = allButtons.find((d) => d.isPos && !d.isNeg && d.r.y > (window.innerHeight * 0.35));
+    if (lowerPos) return lowerPos.btn;
+
+    return null;
   };
 
   const isEnabled = (el) => el && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
 
   const clickButton = (btn) => {
+    if (!btn) return;
+    try { btn.focus(); } catch { /* ignore */ }
+    const rect = typeof btn.getBoundingClientRect === 'function' ? btn.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0 };
+    const cx = rect.x + (rect.width || 0) / 2;
+    const cy = rect.y + (rect.height || 0) / 2;
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: typeof window !== 'undefined' ? window : null,
+      clientX: cx,
+      clientY: cy,
+      button: 0,
+      buttons: 1,
+    };
     try {
       if (typeof PointerEvent !== 'undefined') {
-        const rect = typeof btn.getBoundingClientRect === 'function' ? btn.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0 };
-        const opts = { bubbles: true, cancelable: true, clientX: rect.x + (rect.width || 0) / 2, clientY: rect.y + (rect.height || 0) / 2 };
-        btn.dispatchEvent(new PointerEvent('pointerdown', opts));
-        btn.dispatchEvent(new MouseEvent('mousedown', opts));
-        btn.dispatchEvent(new PointerEvent('pointerup', opts));
-        btn.dispatchEvent(new MouseEvent('mouseup', opts));
+        btn.dispatchEvent(new PointerEvent('pointerdown', eventInit));
+        btn.dispatchEvent(new MouseEvent('mousedown', eventInit));
+        btn.dispatchEvent(new PointerEvent('pointerup', { ...eventInit, buttons: 0 }));
+        btn.dispatchEvent(new MouseEvent('mouseup', { ...eventInit, buttons: 0 }));
       }
-    } catch { /* fallback to standard click */ }
-    if (typeof btn.click === 'function') btn.click();
+    } catch { /* fallback */ }
+    try {
+      btn.dispatchEvent(new MouseEvent('click', { ...eventInit, buttons: 0 }));
+    } catch { /* fallback */ }
+    if (typeof btn.click === 'function') {
+      try { btn.click(); } catch { /* ignore */ }
+    }
+    const kid = btn.children && btn.children[0];
+    if (kid && typeof kid.dispatchEvent === 'function') {
+      try { kid.dispatchEvent(new MouseEvent('click', { ...eventInit, buttons: 0 })); } catch { /* ignore */ }
+    }
+    const form = (typeof btn.closest === 'function' && btn.closest('form')) || (typeof input.closest === 'function' && input.closest('form'));
+    if (form && typeof form.requestSubmit === 'function') {
+      try { form.requestSubmit(btn); } catch { /* ignore */ }
+    }
   };
 
-  const hasText = () => (input.value || input.innerText || '').includes(cfg.prompt.slice(0, 20));
+  const hasText = () => {
+    const val = (input.value || input.innerText || '').trim();
+    const promptLead = norm(cfg.prompt).slice(0, 20);
+    return val.length > 0 && val.includes(promptLead);
+  };
 
   // Initial pause to see if Enter cleared the input or generation started
   await sleep(300);
 
-  // Large blocks (e.g. mail digests with 10KB-40KB) can take 300-600ms for the page framework
-  // (React / Fluent UI / Lexical) to tokenize, update state, and enable the send button.
-  // A single-shot check at 400ms misses it if the button is still aria-disabled="true" during
-  // reconciliation. We poll for up to 2500ms for the button to become enabled.
-  const SEND_WAIT_MS = 2500;
+  const SEND_WAIT_MS = 3500;
   const pollStart = Date.now();
   let clickedBtn = null;
 
-  while (hasText() && !wait.sawStop && (Date.now() - pollStart < SEND_WAIT_MS)) {
+  while (hasText() && !wait.sawStop && !stopNow() && (Date.now() - pollStart < SEND_WAIT_MS)) {
     const btn = findSendButton();
     if (btn && isEnabled(btn)) {
       clickButton(btn);
       clickedBtn = btn;
-      await sleep(200);
-      break;
+      await sleep(300);
+      if (!hasText() || wait.sawStop || stopNow()) break;
     }
-    await sleep(100);
+    await sleep(150);
   }
 
-  if (clickedBtn) {
-    log(`Enter left text in place; clicked send button aria="${clickedBtn.getAttribute('aria-label') || ''}"`);
-  } else if (hasText() && !wait.sawStop) {
+  if (!hasText() || wait.sawStop || stopNow()) {
+    log(`sent successfully (via ${clickedBtn ? `button aria="${clickedBtn.getAttribute('aria-label') || ''}"` : 'Enter'})`);
+  } else {
     // If text remains and generation hasn't started, make one last forced click if button exists
     const btn = findSendButton();
     if (btn) {
+      log(`waited ${Date.now() - pollStart}ms for send button; forced click aria="${btn.getAttribute('aria-label') || ''}" text="${(btn.textContent || '').trim().slice(0, 30)}"`);
       clickButton(btn);
-      log(`waited ${Date.now() - pollStart}ms for send button; forced click aria="${btn.getAttribute('aria-label') || ''}"`);
     } else {
-      log('Enter left text in place and no send button found — send may have failed');
+      log('Enter and button click both failed: text remains in input and no send button found');
     }
-  } else {
-    log('sent via Enter');
   }
 
   // 6. wait for the answer to be finished
@@ -255,6 +334,16 @@ export async function askInPage(cfg) {
         clearInterval(iv); resolve();
         return;
       }
+
+      // Short-circuit: If after 8 seconds no generation ever started and prompt text remains in input,
+      // the send failed to trigger. Do not freeze the terminal for 120 seconds!
+      if (!wait.sawStop && !grew && hasText() && (Date.now() - sentAt > 8000)) {
+        wait.via = 'send-not-triggered';
+        wait.ms = Date.now() - sentAt;
+        clearInterval(iv); resolve();
+        return;
+      }
+
       if (Date.now() - sentAt > cfg.answerTimeoutMs) {
         wait.ms = Date.now() - sentAt;
         clearInterval(iv); resolve();
