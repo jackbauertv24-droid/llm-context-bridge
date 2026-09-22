@@ -95,10 +95,18 @@ export class El {
   click() {
     this.dispatchEvent(new (globalThis.Event || Object)('click', { bubbles: true, cancelable: true }));
   }
+  /**
+   * Returns false when a handler called preventDefault, as a browser does.
+   *
+   * It used to return true unconditionally, which meant this shim could not
+   * tell a handled event from an ignored one — and that is exactly the
+   * distinction that decides whether firing keydown and then keypress
+   * submits a message once or twice.
+   */
   dispatchEvent(ev) {
     for (const f of (this._on && this._on[ev.type]) || []) f(ev);
     if (this.onKey && ev.type === 'keydown') this.onKey(ev);
-    return true;
+    return !ev.defaultPrevented;
   }
 }
 
@@ -128,9 +136,22 @@ export function installGlobals() {
     observe(target) { this.entry = { cb: this.cb, target }; observers.push(this.entry); }
     disconnect() { const i = observers.indexOf(this.entry); if (i >= 0) observers.splice(i, 1); }
   });
-  set('KeyboardEvent', class { constructor(type, init) { Object.assign(this, init); this.type = type; } });
-  set('InputEvent', class { constructor(type, init) { Object.assign(this, init); this.type = type; } });
-  set('Event', class { constructor(type, init) { Object.assign(this, init); this.type = type; } });
+  class ShimEvent {
+    constructor(type, init) {
+      Object.assign(this, init);
+      this.type = type;
+      this.defaultPrevented = false;
+    }
+
+    preventDefault() { if (this.cancelable !== false) this.defaultPrevented = true; }
+
+    stopPropagation() { this.propagationStopped = true; }
+  }
+  set('KeyboardEvent', class extends ShimEvent {});
+  set('InputEvent', class extends ShimEvent {});
+  set('MouseEvent', class extends ShimEvent {});
+  set('PointerEvent', class extends ShimEvent {});
+  set('Event', ShimEvent);
   set('HTMLTextAreaElement', class {});
   set('HTMLInputElement', class {});
   return () => { for (const k of Object.keys(saved)) globalThis[k] = saved[k]; observers.length = 0; };

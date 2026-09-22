@@ -118,33 +118,56 @@ export async function askInPage(cfg) {
 
   // 3. set text
   input.focus();
+  // Leftovers from a previous turn would be sent along with this prompt.
+  const clearComposer = () => {
+    if (!input.isContentEditable) {
+      try {
+        const proto0 = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto0, 'value').set.call(input, '');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      } catch { /* nothing else to try */ }
+      return;
+    }
+    {
+      try {
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        const range = document.createRange();
+        range.selectNodeContents(input);
+        sel.addRange(range);
+        document.execCommand('delete', false);
+      } catch { /* the direct removal below is the fallback */ }
+      if ((input.innerText || '').length > 0) {
+        input.textContent = '';
+        while (input.firstChild) input.removeChild(input.firstChild);
+      }
+    }
+  };
+
   if (input.isContentEditable) {
-    // Clear any leftover content from prior turns or failed attempts to prevent prompt repetition
-    try {
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      const range = document.createRange();
-      range.selectNodeContents(input);
-      sel.addRange(range);
-      document.execCommand('delete', false);
-    } catch { /* ignore */ }
-    if ((input.innerText || '').trim().length > 0) {
-      input.textContent = '';
-      while (input.firstChild) input.removeChild(input.firstChild);
-    }
-    // Insert new prompt cleanly
-    try {
-      input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: cfg.prompt }));
-    } catch { /* ignore if unsupported */ }
-    document.execCommand('insertText', false, cfg.prompt);   // fires beforeinput/input for React/Lexical/ProseMirror
-    if ((input.innerText || '').trim() !== cfg.prompt.trim()) {
+    clearComposer();
+    // Insert the prompt exactly once.
+    //
+    // A synthetic beforeinput carrying the text used to be dispatched here
+    // and then execCommand('insertText') called as well. A modern editor —
+    // Lexical, ProseMirror — handles beforeinput by inserting the data
+    // itself, and execCommand then inserted it a second time, so typing
+    // "Blast" put "BlastBlast" in the box. execCommand already fires a real
+    // beforeinput and input pair of its own; the manual one was pure
+    // duplication.
+    try { document.execCommand('insertText', false, cfg.prompt); } catch { /* checked below */ }
+
+    // Verify rather than assume. Too much text is as wrong as too little,
+    // and the doubling above went unnoticed because the old check used
+    // !== on trimmed text and then *appended* a correction.
+    if (norm(input.innerText || '') !== norm(cfg.prompt)) {
+      clearComposer();
       input.textContent = cfg.prompt;
-    }
-    // Ensure React/Lexical/ProseMirror registers the text insertion and updates character count / send button state
-    try {
-      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
-    } catch {
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+      try {
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+      } catch {
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
     }
   } else {
     const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -153,7 +176,31 @@ export async function askInPage(cfg) {
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
   await sleep(100);
-  log(`text set, input now holds ${(input.value || input.innerText || '').length} chars`);
+
+  // What is actually in the box, compared with what was meant to be there.
+  // A prompt that arrived doubled — "BlastBlast" for "Blast" — was sent as
+  // though nothing were wrong, because the length was never compared with
+  // the length expected. A wrong message costs the same as a right one and
+  // teaches the model something untrue, so it is not sent.
+  const inBox = norm(input.value || input.innerText || '');
+  const wanted = norm(cfg.prompt);
+  debug.composer = { expected: wanted.length, actual: inBox.length, matched: inBox === wanted };
+  if (inBox !== wanted) {
+    const doubled = inBox.length >= wanted.length * 2 && inBox.startsWith(wanted);
+    log(`the composer holds ${inBox.length} characters where ${wanted.length} were expected`
+      + `${doubled ? ' — the text was inserted more than once' : ''}`);
+    clearComposer();
+    debug.wait = { via: 'not-sent-bad-composer', sawStop: false, ms: 0, submissions: 0 };
+    return {
+      ok: true,
+      notSent: true,
+      badComposer: true,
+      text: '',
+      method: `not sent: the composer held ${inBox.length} characters instead of ${wanted.length}`,
+      debug,
+    };
+  }
+  log(`text set, input holds exactly the ${inBox.length} characters expected`);
 
   const answerBlocks = () => {
     if (cfg.answerSelector) {
@@ -185,13 +232,21 @@ export async function askInPage(cfg) {
   let submissions = 0;
   const fireEnter = (el, ctrl = false) => {
     submissions++;
-    for (const type of ['keydown', 'keypress', 'keyup']) {
-      el.dispatchEvent(new KeyboardEvent(type, {
-        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
-        bubbles: true, cancelable: true,
-        ctrlKey: ctrl, metaKey: ctrl,
-      }));
-    }
+    const key = (type) => new KeyboardEvent(type, {
+      key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+      bubbles: true, cancelable: true,
+      ctrlKey: ctrl, metaKey: ctrl,
+    });
+    // keydown, then keypress only if the page did not take the keydown.
+    //
+    // All three were fired unconditionally, so a page carrying a handler on
+    // keydown and a legacy one on keypress submitted twice from one
+    // keystroke — the same fault as inserting the text twice, wearing a
+    // different hat. It is not faithful either: in a browser, a keydown
+    // whose default is prevented does not produce a keypress at all.
+    const notTaken = el.dispatchEvent(key('keydown'));
+    if (notTaken) el.dispatchEvent(key('keypress'));
+    el.dispatchEvent(key('keyup'));
   };
   // The page says when it is done: it shows a stop control while generating
   // and removes it when it finishes. Watching for that is exact, where
