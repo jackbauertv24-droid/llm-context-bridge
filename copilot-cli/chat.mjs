@@ -117,6 +117,7 @@ With an authenticated Confluence tab open in Chrome:
 With mail.env set up, the agent also gets a read-only view of your mail:
 
   node chat.mjs --record             record what the real page is and does
+  node chat.mjs --record --as-agent  record it with the real agent prompt
   node chat.mjs --mail-check          check the setup, one run, changes nothing
   node chat.mjs --agent:mail "summarise anything from the last 10 days that needs a reply"
   node chat.mjs --agent "..." --skills files,mail
@@ -699,11 +700,25 @@ async function runMailCheck(args) {
  */
 async function runRecord(cdp, args) {
   const pi = args.indexOf('--prompt');
-  const probePrompt = pi !== -1 ? args[pi + 1] : 'ping';
+  let probePrompt = pi !== -1 ? args[pi + 1] : 'ping';
+
+  // --as-agent records with the real agent instructions rather than a toy
+  // word. A recording of "ping" said nothing about what this page does to a
+  // long markdown prompt, which is the payload that actually gets sent, and
+  // the agent broke on exactly that difference.
+  const ai = args.indexOf('--as-agent');
+  if (ai !== -1) {
+    const skillName = (args[ai + 1] && !args[ai + 1].startsWith('-')) ? args[ai + 1] : 'files';
+    const { renderSystemPrompt } = await import('./lib-agent.mjs');
+    const root = LOCAL.cwd;
+    const resolved = registry.resolve(skillName, { root, mailEnv: null });
+    probePrompt = `${renderSystemPrompt(root, resolved.tools, { skills: resolved.activeSkills })}\n\nTASK: list the files here`;
+    note(`[record] recording with the real "${skillName}" agent prompt — ${probePrompt.length} characters.`);
+  }
   const { recordPage } = await import('./lib-record.mjs');
 
-  note('[record] this sends ONE short message and watches what the page does.');
-  note(`[record] the message is: ${JSON.stringify(probePrompt)}`);
+  note('[record] this sends ONE message and watches what the page does.');
+  note(`[record] the message is ${probePrompt.length} characters${probePrompt.length <= 40 ? `: ${JSON.stringify(probePrompt)}` : ' (the agent instructions)'}`);
   let rec;
   try {
     rec = await cdp.evalFn(recordPage, { ...CONFIG, probePrompt }, { timeoutMs: 90000 });
@@ -721,7 +736,14 @@ async function runRecord(cdp, args) {
   // visible without opening the file.
   note('');
   note(`input chosen:        ${rec.chosenInput ? rec.chosenInput.path : '(none found)'}`);
-  note(`one insert gives:    ${JSON.stringify(rec.insert ? rec.insert.got : null)}${rec.insert && rec.insert.doubled ? '   <-- DOUBLED' : ''}`);
+  if (rec.insert) {
+    note(`typed ${rec.insert.askedChars} chars, box holds ${rec.insert.gotLength} (delta ${rec.insert.delta})${rec.insert.doubled ? '   <-- DOUBLED' : ''}`);
+    const st = rec.insert.structure;
+    if (st && (st.bulletLines || st.headingLines || st.fenceLines)) {
+      note(`  the prompt had ${st.bulletLines} bullets, ${st.headingLines} headings, ${st.fenceLines} fences`);
+      note(`  stripping those markers would account for ${rec.insert.explains.total} characters`);
+    }
+  }
   note(`Enter was consumed:  ${rec.enter ? rec.enter.keydownDefaultPrevented : '?'}`);
   note(`idle churn:          ${rec.idle.mutations} mutations and ${rec.idle.charGrowth} characters over 3s`);
   note(`stop-like controls:  ${rec.stopLike.length} in the page, ${rec.idle.stopLikeVisibleWhileIdle.length} visible while idle`);

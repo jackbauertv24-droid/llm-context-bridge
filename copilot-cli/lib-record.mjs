@@ -190,13 +190,42 @@ export async function recordPage(cfg) {
   // this code a moment ago. Comparing it back is how a doubled insert is
   // detected. Anything unexpected is reported as a length, not quoted.
   const held = norm(input.value || input.innerText || '');
-  out.insert = {
-    asked: probePrompt,
-    got: (held === probePrompt || held === probePrompt + probePrompt) ? held : '(unexpected; see gotLength)',
-    gotLength: held.length,
-    doubled: held === probePrompt + probePrompt,
+  // What the editor did to the text, measured rather than inferred.
+  //
+  // Recording a single short word proved nothing about a long one: "ping"
+  // has no list markers, headings or code fences for a markdown-formatting
+  // composer to eat, so a recording of it could not predict that forty
+  // characters would vanish from a two-thousand-six-hundred character agent
+  // prompt. The structure of what was sent is counted here so the
+  // difference can be attributed instead of guessed at.
+  const askedLines = String(probePrompt).split('\n');
+  const structure = {
+    chars: norm(probePrompt).length,
+    lines: askedLines.length,
+    bulletLines: askedLines.filter((l) => /^\s*[-*+]\s+/.test(l)).length,
+    headingLines: askedLines.filter((l) => /^\s*#{1,6}\s+/.test(l)).length,
+    fenceLines: askedLines.filter((l) => /^\s*`{3,}/.test(l)).length,
+    blankLines: askedLines.filter((l) => !l.trim()).length,
+    angleTags: (String(probePrompt).match(/<[a-z][^>]*>/gi) || []).length,
   };
-  mark('text inserted', { chars: held.length });
+  const delta = held.length - structure.chars;
+  out.insert = {
+    asked: structure.chars <= 40 ? probePrompt : '(long prompt; see structure)',
+    askedChars: structure.chars,
+    gotLength: held.length,
+    delta,
+    doubled: held.length >= structure.chars * 1.8,
+    structure,
+    // The arithmetic that would explain a shortfall, so the rule the editor
+    // follows can be read off rather than assumed.
+    explains: {
+      bulletMarkers: structure.bulletLines * 2,
+      headingMarkers: structure.headingLines * 2,
+      fenceBackticks: structure.fenceLines * 3,
+      total: structure.bulletLines * 2 + structure.headingLines * 2 + structure.fenceLines * 3,
+    },
+  };
+  mark('text inserted', { chars: held.length, expected: structure.chars, delta });
 
   const keydownTaken = safe(() => !input.dispatchEvent(new KeyboardEvent('keydown', {
     key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
