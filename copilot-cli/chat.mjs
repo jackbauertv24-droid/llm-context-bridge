@@ -291,7 +291,11 @@ async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv, 
 
   let resolved;
   try {
-    resolved = registry.resolve(skillName, { root: sess.root, mailEnv });
+    const resolveCtx = { root: sess.root, mailEnv, confluenceClient: sess.confluenceClient };
+    resolved = registry.resolve(skillName, resolveCtx);
+    if (resolveCtx.confluenceClient && !sess.confluenceClient) {
+      sess.confluenceClient = resolveCtx.confluenceClient;
+    }
   } catch (err) {
     note(`[agent] ${err.message}`);
     return false;
@@ -657,6 +661,9 @@ async function main() {
     if (q === '/help') { note(HELP); rl.prompt(); return; }
     if (q === '/config') { note(JSON.stringify({ ...CONFIG, ...LOCAL }, null, 2)); rl.prompt(); return; }
     if (q === '/new' || q === '/reset') {
+      if (agentSession?.confluenceClient) {
+        try { agentSession.confluenceClient.close(); } catch { /* ignore */ }
+      }
       agentSession = null;
       lastDebug = null;
       note('[agent] session reset; next turn will begin with a fresh prompt and toolset.');
@@ -708,7 +715,14 @@ async function main() {
     rl.prompt();
   });
 
-  rl.on('close', () => { if (cdp) cdp.close(); note('\nbye'); process.exit(0); });
+  rl.on('close', () => {
+    if (cdp) cdp.close();
+    if (agentSession?.confluenceClient) {
+      try { agentSession.confluenceClient.close(); } catch { /* ignore */ }
+    }
+    note('\nbye');
+    process.exit(0);
+  });
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

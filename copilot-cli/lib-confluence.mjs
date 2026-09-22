@@ -734,7 +734,8 @@ export async function runConfluenceCheck(args = []) {
         log(`    Results Count: ${a.body.results.length} (totalSize: ${a.body.totalSize ?? 'n/a'})`);
         if (a.body.results[0]) {
           const first = a.body.results[0];
-          log(`    Sample: id=${first.id} title="${first.title}"`);
+          const desc = first.title ? `title="${first.title}"` : (first.name ? `name="${first.name}" (key=${first.key})` : `id=${first.id}`);
+          log(`    Sample: id=${first.id} ${desc}`);
         }
       } else if (Array.isArray(a.body.result)) {
         log(`    Results Count: ${a.body.result.length}`);

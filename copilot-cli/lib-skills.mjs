@@ -121,6 +121,7 @@ export const confluenceSkill = {
   }),
   getTools: (ctx = {}) => {
     const client = ctx.confluenceClient || new ConfluenceClient(loadConfluenceConfig({ root: ctx.root }));
+    if (ctx && !ctx.confluenceClient) ctx.confluenceClient = client;
     return confluenceTools(client);
   },
   promptRules: [
