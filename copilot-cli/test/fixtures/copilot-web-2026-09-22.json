@@ -1,0 +1,217 @@
+{
+ "source": "node chat.mjs --record on the live Microsoft Copilot web chat",
+ "recordedWith": "2026-09-22.5",
+ "note": "Text was never captured; every string here is structural. The URL query was dropped.",
+ "when": "2026-09-22T09:52:21.554Z",
+ "url": "https://copilot.cloud.microsoft/chat",
+ "title": "Chat | Microsoft Copilot",
+ "viewport": {
+  "w": 1920,
+  "h": 945
+ },
+ "chosenInput": {
+  "path": "div#m365-chat-input-shared-container > div > div > div > span > span#m365-chat-editor-target-element",
+  "tag": "span",
+  "id": "m365-chat-editor-target-element",
+  "cls": "fai-EditorInput__input r18fti29 r18aquq2 ___dilz7s0 f1pe8h68",
+  "role": "textbox",
+  "ariaLabel": "Message Copilot",
+  "contenteditable": "true",
+  "disabled": false,
+  "visible": true,
+  "rect": {
+   "x": 735,
+   "y": 495,
+   "w": 704,
+   "h": 27
+  }
+ },
+ "composerAncestry": [
+  {
+   "tag": "span",
+   "cls": "fai-EditorInput fai-BebopLiteChatInput__editor",
+   "rect": {
+    "x": 727,
+    "y": 495,
+    "w": 720,
+    "h": 27
+   },
+   "buttons": 0
+  },
+  {
+   "tag": "div",
+   "cls": "fai-BebopLiteChatInput__inputWrapper",
+   "rect": {
+    "x": 678,
+    "y": 478,
+    "w": 820,
+    "h": 60
+   },
+   "buttons": 2
+  },
+  {
+   "tag": "div",
+   "cls": "fai-BebopLiteChatInput",
+   "rect": {
+    "x": 678,
+    "y": 462,
+    "w": 820,
+    "h": 76
+   },
+   "buttons": 2
+  },
+  {
+   "tag": "div",
+   "cls": "___93hzez0",
+   "rect": {
+    "x": 678,
+    "y": 462,
+    "w": 820,
+    "h": 160
+   },
+   "buttons": 7
+  },
+  {
+   "tag": "div",
+   "id": "m365-chat-input-shared-container",
+   "rect": {
+    "x": 678,
+    "y": 462,
+    "w": 820,
+    "h": 160
+   },
+   "buttons": 7
+  }
+ ],
+ "buttonCount": 97,
+ "stopLike": [],
+ "sendLike": [
+  {
+   "path": "a#menu_r_bd_[tasks-launcher-button]",
+   "tag": "a",
+   "id": "menu_r_bd_",
+   "testid": "tasks-launcher-button",
+   "role": "button",
+   "ariaLabel": "Task Hub",
+   "visible": true,
+   "rect": {
+    "x": 183,
+    "y": 12,
+    "w": 32,
+    "h": 32
+   }
+  }
+ ],
+ "stopSelectorInUse": {
+  "selector": "button[aria-label*=\"stop\" i], button[title*=\"stop\" i], [data-testid*=\"stop\" i]",
+  "matches": []
+ },
+ "answerSelector": {
+  "selector": "[data-testid=\"markdown-reply\"]",
+  "matches": 0,
+  "last": null
+ },
+ "conversationRegion": null,
+ "idle": {
+  "seconds": 3,
+  "startChars": 3523,
+  "endChars": 3523,
+  "charGrowth": 0,
+  "mutations": 0,
+  "stopLikeVisibleWhileIdle": []
+ },
+ "insert": {
+  "asked": "ping",
+  "gotLength": 6,
+  "doubled": false
+ },
+ "enter": {
+  "keydownDefaultPrevented": true
+ },
+ "turn": {
+  "prompt": "ping",
+  "composerClearedAt": 671,
+  "stopAppearedAt": 671,
+  "stopGoneAt": 4237,
+  "answerAppearedAt": 671,
+  "totalMs": 6781,
+  "charsBefore": 3523,
+  "charsAfter": 3685,
+  "stopVisibleBefore": 0,
+  "stopVisibleAfter": 0,
+  "timeline": [
+   {
+    "atMs": 159,
+    "what": "text inserted",
+    "chars": 6
+   },
+   {
+    "atMs": 166,
+    "what": "keydown dispatched",
+    "defaultPrevented": true
+   },
+   {
+    "atMs": 671,
+    "what": "composer cleared"
+   },
+   {
+    "atMs": 671,
+    "what": "a stop control appeared",
+    "count": 1
+   },
+   {
+    "atMs": 671,
+    "what": "a new answer node appeared",
+    "count": 1
+   },
+   {
+    "atMs": 1187,
+    "what": "text grew",
+    "by": 24
+   },
+   {
+    "atMs": 2201,
+    "what": "text grew",
+    "by": 26
+   },
+   {
+    "atMs": 2710,
+    "what": "text grew",
+    "by": 20
+   },
+   {
+    "atMs": 4237,
+    "what": "the stop control went away"
+   },
+   {
+    "atMs": 4237,
+    "what": "text grew",
+    "by": 68
+   },
+   {
+    "atMs": 4738,
+    "what": "text grew",
+    "by": 48
+   },
+   {
+    "atMs": 5239,
+    "what": "text grew",
+    "by": 59
+   }
+  ],
+  "lastAnswer": {
+   "path": "div#response-id[lastChatMessage] > div > div > div > div[markdown-reply]",
+   "tag": "div",
+   "testid": "markdown-reply",
+   "visible": true,
+   "rect": {
+    "x": 732,
+    "y": 172,
+    "w": 708,
+    "h": 76
+   },
+   "textLength": 46
+  },
+  "lastAnswerChars": 46
+ }
+}
