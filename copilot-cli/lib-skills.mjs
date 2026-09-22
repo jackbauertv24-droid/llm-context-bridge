@@ -17,7 +17,13 @@ import { confluenceTools, ConfluenceClient, loadConfluenceConfig } from './lib-c
  * - summary: short one-line description
  * - mutates: whether any tool in this bundle modifies local files or server state
  * - sampleTag: example XML tag for system prompt formatting
- * - isAvailable(ctx): { available: boolean, detail?: string, reason?: string }
+ * - isAvailable(ctx): { available, detail?, reason?, blocking? }
+ *     blocking defaults to true: the skill cannot work and naming it is an
+ *     error. Set it false when unavailability is only an inference — the
+ *     confluence check reads a config file, but what the tools really need
+ *     is an open tab, which cannot be seen from here. Asking for a skill by
+ *     name is a statement of intent, so a non-blocking doubt becomes a
+ *     warning rather than a refusal.
  * - getTools(ctx): returns map of { [toolName]: toolDefinition }
  * - promptRules: array of specific guidance strings rendered under RULES
  */
@@ -123,7 +129,12 @@ export const confluenceSkill = {
     if (!cfg.configured) {
       return {
         available: false,
-        reason: 'confluence is not configured (copy confluence.env.example to confluence.env)',
+        // Not blocking: the tools need an authenticated tab, not this file.
+        // A missing confluence.env means "do not offer this automatically",
+        // not "this cannot work".
+        blocking: false,
+        reason: 'no confluence.env, so it is not offered automatically; '
+          + `asking for it by name still works if a tab matching "${cfg.tabMatch}" is open`,
       };
     }
     return {
@@ -196,6 +207,7 @@ export class SkillRegistry {
 
     const activeSkills = [];
     const tools = {};
+    const warnings = [];
 
     for (const rawId of ids) {
       const canonical = this.aliases.get(rawId) || rawId;
@@ -207,7 +219,13 @@ export class SkillRegistry {
 
       const status = skill.isAvailable(ctx);
       if (!status.available) {
-        throw new Error(`Skill "${skill.id}" cannot be activated: ${status.reason || 'prerequisites not met'}`);
+        // 'all' and 'default' already filtered on availability, so reaching
+        // here means this skill was asked for by name.
+        if (status.blocking === false) {
+          warnings.push(`${skill.id}: ${status.reason || 'prerequisites unconfirmed'}`);
+        } else {
+          throw new Error(`Skill "${skill.id}" cannot be activated: ${status.reason || 'prerequisites not met'}`);
+        }
       }
 
       activeSkills.push(skill);
@@ -220,6 +238,7 @@ export class SkillRegistry {
     return {
       activeSkills,
       tools,
+      warnings,
       summary: activeSkills.map((s) => s.id).join(', '),
     };
   }

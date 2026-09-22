@@ -336,6 +336,9 @@ async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv, 
   sess.activeSkillIds = currentSkillIds;
 
   note(`[agent] active skills: ${resolved.summary}`);
+  // A skill activated on an unconfirmed prerequisite says so, rather than
+  // failing later in a way that looks like the tool is broken.
+  for (const w of resolved.warnings || []) note(`[agent] note — ${w}`);
   for (const s of resolved.activeSkills) {
     const st = s.isAvailable({ root: sess.root, mailEnv });
     if (st.detail) note(`  - ${s.name}: ${st.detail}${s.mutates ? '' : ' (read-only)'}`);
