@@ -65,6 +65,12 @@ export class El {
 
   get isConnected() { let e = this; while (e.parentElement) e = e.parentElement; return e === document.body; }
 
+  get firstChild() { return this.children[0] || null; }
+  removeChild(kid) {
+    const i = this.children.indexOf(kid);
+    if (i >= 0) { this.children.splice(i, 1); kid.parentElement = null; }
+    return kid;
+  }
   append(...kids) {
     for (const k of kids) { k.parentElement = this; this.children.push(k); }
     notify(kids.map((k) => ({ type: 'childList', addedNodes: [k], target: this })));

@@ -59,6 +59,8 @@ export function confluenceHtmlToText(html) {
     .replace(/&amp;/gi, '&')
     .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
     .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+- /g, '\n- ')
+    .replace(/(\n- [^\n]+)\n{2,}- /g, '$1\n- ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }

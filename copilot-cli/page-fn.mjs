@@ -87,18 +87,28 @@ export async function askInPage(cfg) {
   // 3. set text
   input.focus();
   if (input.isContentEditable) {
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    const range = document.createRange();
-    range.selectNodeContents(input);
-    sel.addRange(range);
-    document.execCommand('delete', false);
-    document.execCommand('insertText', false, cfg.prompt);   // fires beforeinput/input for React/Lexical/ProseMirror
-    if (!input.innerText.trim()) { input.textContent = cfg.prompt; }
-    // Ensure React/Lexical/ProseMirror registers the text insertion and updates character count / send button state
+    // Clear any leftover content from prior turns or failed attempts to prevent prompt repetition
+    try {
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      sel.addRange(range);
+      document.execCommand('delete', false);
+    } catch { /* ignore */ }
+    if ((input.innerText || '').trim().length > 0) {
+      input.textContent = '';
+      while (input.firstChild) input.removeChild(input.firstChild);
+    }
+    // Insert new prompt cleanly
     try {
       input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: cfg.prompt }));
     } catch { /* ignore if unsupported */ }
+    document.execCommand('insertText', false, cfg.prompt);   // fires beforeinput/input for React/Lexical/ProseMirror
+    if ((input.innerText || '').trim() !== cfg.prompt.trim()) {
+      input.textContent = cfg.prompt;
+    }
+    // Ensure React/Lexical/ProseMirror registers the text insertion and updates character count / send button state
     try {
       input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
     } catch {
