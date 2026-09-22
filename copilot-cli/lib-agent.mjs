@@ -295,6 +295,13 @@ export async function runAgent({
     const reply = await ask(prompt);
     if (reply === null || reply === undefined) return { done: false, steps: step, stalled: 'no answer came back' };
 
+    if (/please wait (for|until) the (current|previous) response/i.test(reply)) {
+      if (ui.toolError) ui.toolError('copilot', 'page was still busy with a previous response; retrying...');
+      await new Promise((r) => setTimeout(r, 4000));
+      step--;
+      continue;
+    }
+
     const prose = proseOf(reply);
     if (prose) ui.prose(prose);
 

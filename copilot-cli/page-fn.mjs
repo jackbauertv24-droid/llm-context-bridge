@@ -61,6 +61,26 @@ export async function askInPage(cfg) {
   const bodyBaseLen = document.body.innerText.length;
   const composer = input.closest('form') || input.parentElement;
 
+  // Pre-flight check: ensure Copilot is not currently streaming a previous answer
+  const stopSelector = cfg.stopSelector
+    || 'button[aria-label*="stop" i], button[title*="stop" i], [data-testid*="stop" i]';
+  const stopNow = () => {
+    try {
+      for (const el of document.querySelectorAll(stopSelector)) if (vis(el)) return el;
+    } catch { /* a malformed override must not break the turn */ }
+    return null;
+  };
+
+  const preflightStart = Date.now();
+  while (stopNow() && (Date.now() - preflightStart < 30000)) {
+    log('waiting for previous response to finish streaming...');
+    await sleep(500);
+  }
+  const inputReadyStart = Date.now();
+  while ((input.disabled || input.getAttribute('aria-disabled') === 'true') && (Date.now() - inputReadyStart < 10000)) {
+    await sleep(300);
+  }
+
   // 3. set text
   input.focus();
   if (input.isContentEditable) {
@@ -135,15 +155,6 @@ export async function askInPage(cfg) {
   //
   // Visibility is checked, not just presence: a stop control left in the DOM
   // but hidden would otherwise read as "still generating" until the timeout.
-  const stopSelector = cfg.stopSelector
-    || 'button[aria-label*="stop" i], button[title*="stop" i], [data-testid*="stop" i]';
-  const stopNow = () => {
-    try {
-      for (const el of document.querySelectorAll(stopSelector)) if (vis(el)) return el;
-    } catch { /* a malformed override must not break the turn */ }
-    return null;
-  };
-
   const TICK = 100;
   const wait = { via: 'timeout', sawStop: false, ms: 0, selector: stopSelector };
   let goneFor = 0;
@@ -501,7 +512,12 @@ export async function askInPage(cfg) {
     };
   } catch (e) { debug.capture = { error: String(e && e.message) }; }
 
-  log(`extracted via ${method}, ${text.length} chars`);
-  return { ok: true, text, method, debug };
+  const isBusy = /please wait (for|until) the (current|previous) response/i.test(text);
+  if (isBusy) {
+    log('Copilot was busy ("Please wait for current response"); flagging busy state');
+  }
+
+  log(`extracted via ${method}, ${text.length} chars${isBusy ? ' (busy warning)' : ''}`);
+  return { ok: !isBusy, busy: isBusy, text, method, debug };
 }
 

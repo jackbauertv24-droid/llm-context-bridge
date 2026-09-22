@@ -150,7 +150,7 @@ function readStdin() {
  * result tags through this, and an "@" inside a file is not an attachment.
  * Returns null when the turn produced no usable answer.
  */
-async function askPage(cdp, full) {
+async function askPage(cdp, full, retries = 2) {
   let res;
   try {
     res = await cdp.evalFn(askInPage, { ...CONFIG, prompt: full }, { timeoutMs: CONFIG.answerTimeoutMs + 8000 });
@@ -170,6 +170,18 @@ async function askPage(cdp, full) {
     }, null, 2) + '\n');
     if (capture) fs.writeFileSync('copilot-cli-capture.json', JSON.stringify(capture, null, 1) + '\n');
   } catch { /* diagnostics are a nicety, never a reason to fail a turn */ }
+
+  const isBusy = (res && res.busy) || /please wait (for|until) the (current|previous) response/i.test(res?.text || '');
+  if (isBusy) {
+    if (retries > 0) {
+      note('[bridge] Copilot was busy with a previous response; waiting 4s before automatic retry...');
+      await new Promise((r) => setTimeout(r, 4000));
+      return askPage(cdp, full, retries - 1);
+    }
+    note('[bridge] Copilot is still busy: "Please wait for the current response to finish."');
+    note('[bridge] Wait for the current response in Chrome to finish, or click "+ New chat" in the tab.');
+    return null;
+  }
 
   // Say so when the pick looks doubtful, rather than printing it as if sound.
   const best = res.debug && res.debug.candidates && res.debug.candidates[0];
