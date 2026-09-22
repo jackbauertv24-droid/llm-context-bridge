@@ -71,7 +71,13 @@ export async function askInPage(cfg) {
     sel.addRange(range);
     document.execCommand('delete', false);
     document.execCommand('insertText', false, cfg.prompt);   // fires beforeinput/input for React/Lexical/ProseMirror
-    if (!input.innerText.trim()) { input.textContent = cfg.prompt; input.dispatchEvent(new InputEvent('input', { bubbles: true })); }
+    if (!input.innerText.trim()) { input.textContent = cfg.prompt; }
+    // Ensure React/Lexical/ProseMirror registers the text insertion and updates character count / send button state
+    try {
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+    } catch {
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
   } else {
     const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
@@ -108,9 +114,13 @@ export async function askInPage(cfg) {
   obs.observe(document.body, { subtree: true, childList: true, characterData: true });
 
   // 5. send: Enter first, click a send button as fallback
-  const fireEnter = (el) => {
+  const fireEnter = (el, ctrl = false) => {
     for (const type of ['keydown', 'keypress', 'keyup']) {
-      el.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+      el.dispatchEvent(new KeyboardEvent(type, {
+        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+        bubbles: true, cancelable: true,
+        ctrlKey: ctrl, metaKey: ctrl,
+      }));
     }
   };
   // The page says when it is done: it shows a stop control while generating
@@ -135,25 +145,84 @@ export async function askInPage(cfg) {
   const wait = { via: 'timeout', sawStop: false, ms: 0, selector: stopSelector };
   let goneFor = 0;
 
+  // Send attempt 1: Enter
   fireEnter(input);
+  if (cfg.prompt.includes('\n')) {
+    // In rich text editors (Lexical, ProseMirror), multiline text often requires Ctrl+Enter to submit
+    fireEnter(input, true);
+  }
+
   const sentAt = Date.now();
   // Started here, not after the send check below: a short answer can be over
   // within that 400ms, and a signal we were not yet watching for is no signal.
   const watchStop = setInterval(() => {
     if (stopNow()) { wait.sawStop = true; goneFor = 0; } else { goneFor += TICK; }
   }, TICK);
-  await sleep(400);
-  const stillHasText = (input.value || input.innerText || '').includes(cfg.prompt.slice(0, 20));
-  if (stillHasText) {
-    let btn = cfg.sendSelector ? document.querySelector(cfg.sendSelector) : null;
-    if (!btn) {
-      btn = [...document.querySelectorAll('button, [role="button"]')].filter(vis).find((el) => {
-        const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`.toLowerCase();
-        return /send|submit/.test(label) && !(el.disabled || el.getAttribute('aria-disabled') === 'true');
-      });
+
+  const findSendButton = () => {
+    if (cfg.sendSelector) {
+      try {
+        const el = document.querySelector(cfg.sendSelector);
+        if (el && vis(el)) return el;
+      } catch { /* malformed override fallback */ }
     }
-    if (btn) { btn.click(); log(`Enter left text in place; clicked send button aria="${btn.getAttribute('aria-label') || ''}"`); }
-    else log('Enter left text in place and no send button found — send may have failed');
+    return [...document.querySelectorAll('button, [role="button"]')].filter(vis).find((el) => {
+      const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`.toLowerCase();
+      return /send|submit/.test(label);
+    });
+  };
+
+  const isEnabled = (el) => el && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+
+  const clickButton = (btn) => {
+    try {
+      if (typeof PointerEvent !== 'undefined') {
+        const rect = typeof btn.getBoundingClientRect === 'function' ? btn.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0 };
+        const opts = { bubbles: true, cancelable: true, clientX: rect.x + (rect.width || 0) / 2, clientY: rect.y + (rect.height || 0) / 2 };
+        btn.dispatchEvent(new PointerEvent('pointerdown', opts));
+        btn.dispatchEvent(new MouseEvent('mousedown', opts));
+        btn.dispatchEvent(new PointerEvent('pointerup', opts));
+        btn.dispatchEvent(new MouseEvent('mouseup', opts));
+      }
+    } catch { /* fallback to standard click */ }
+    if (typeof btn.click === 'function') btn.click();
+  };
+
+  const hasText = () => (input.value || input.innerText || '').includes(cfg.prompt.slice(0, 20));
+
+  // Initial pause to see if Enter cleared the input or generation started
+  await sleep(300);
+
+  // Large blocks (e.g. mail digests with 10KB-40KB) can take 300-600ms for the page framework
+  // (React / Fluent UI / Lexical) to tokenize, update state, and enable the send button.
+  // A single-shot check at 400ms misses it if the button is still aria-disabled="true" during
+  // reconciliation. We poll for up to 2500ms for the button to become enabled.
+  const SEND_WAIT_MS = 2500;
+  const pollStart = Date.now();
+  let clickedBtn = null;
+
+  while (hasText() && !wait.sawStop && (Date.now() - pollStart < SEND_WAIT_MS)) {
+    const btn = findSendButton();
+    if (btn && isEnabled(btn)) {
+      clickButton(btn);
+      clickedBtn = btn;
+      await sleep(200);
+      break;
+    }
+    await sleep(100);
+  }
+
+  if (clickedBtn) {
+    log(`Enter left text in place; clicked send button aria="${clickedBtn.getAttribute('aria-label') || ''}"`);
+  } else if (hasText() && !wait.sawStop) {
+    // If text remains and generation hasn't started, make one last forced click if button exists
+    const btn = findSendButton();
+    if (btn) {
+      clickButton(btn);
+      log(`waited ${Date.now() - pollStart}ms for send button; forced click aria="${btn.getAttribute('aria-label') || ''}"`);
+    } else {
+      log('Enter left text in place and no send button found — send may have failed');
+    }
   } else {
     log('sent via Enter');
   }

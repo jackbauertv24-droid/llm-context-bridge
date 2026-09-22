@@ -86,6 +86,9 @@ export class El {
   getBoundingClientRect() { return { ...this.rect }; }
   focus() { this.focused = true; }
   addEventListener(t, f) { (this._on ||= {})[t] = [...((this._on || {})[t] || []), f]; }
+  click() {
+    this.dispatchEvent(new (globalThis.Event || Object)('click', { bubbles: true, cancelable: true }));
+  }
   dispatchEvent(ev) {
     for (const f of (this._on && this._on[ev.type]) || []) f(ev);
     if (this.onKey && ev.type === 'keydown') this.onKey(ev);
