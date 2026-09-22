@@ -18,6 +18,20 @@ export async function askInPage(cfg) {
     return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
   };
   const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  /**
+   * The text a person would say is in the box.
+   *
+   * A recording of the real page settled this: typing the four letters
+   * "ping" leaves six characters behind. Rich editors anchor their
+   * selection with zero-width characters, and those are not whitespace, so
+   * norm() keeps them and every comparison against the prompt failed. The
+   * turn was then refused for holding the wrong text — on every message,
+   * including a two-letter "hi".
+   */
+  const visibleText = (s) => norm(String(s || '')
+    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD\u180E]/g, '')
+    .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+    .replace(/\u00A0/g, ' '));
   // A short, readable path for an element, so a bad pick can be turned into a
   // pinned selector without a separate probe run.
   const pathOf = (el) => {
@@ -226,7 +240,7 @@ export async function askInPage(cfg) {
     // Verify rather than assume. Too much text is as wrong as too little,
     // and the doubling above went unnoticed because the old check used
     // !== on trimmed text and then *appended* a correction.
-    if (norm(input.innerText || '') !== norm(cfg.prompt)) {
+    if (visibleText(input.innerText) !== visibleText(cfg.prompt)) {
       // Repairing this is a safety net, not a success. Recorded, because a
       // silent repair hides the fault that made it necessary: the doubled
       // insert was corrected here and so looked fine from the outside.
@@ -254,8 +268,8 @@ export async function askInPage(cfg) {
   // though nothing were wrong, because the length was never compared with
   // the length expected. A wrong message costs the same as a right one and
   // teaches the model something untrue, so it is not sent.
-  const inBox = norm(input.value || input.innerText || '');
-  const wanted = norm(cfg.prompt);
+  const inBox = visibleText(input.value || input.innerText || '');
+  const wanted = visibleText(cfg.prompt);
   debug.composer = { expected: wanted.length, actual: inBox.length, matched: inBox === wanted, corrected: composerCorrected };
   if (inBox !== wanted) {
     const doubled = inBox.length >= wanted.length * 2 && inBox.startsWith(wanted);
@@ -369,7 +383,11 @@ export async function askInPage(cfg) {
     } catch { /* ignore */ }
     const full = `${aria} ${title} ${testid} ${id} ${text} ${innerAria} ${innerTitle}`.toLowerCase();
     const isNeg = /feedback|report|help|attach|file|upload|voice|mic|audio|cancel|dismiss|close|clear|delete|history|menu|settings|expand|collapse/i.test(full);
-    const isPos = /send|submit|ask|arrow/i.test(full) || btn.type === 'submit' || btn.getAttribute('type') === 'submit';
+    // Whole words. Unanchored, "ask" matched the "Task" in "Task Hub" — a
+    // recording of the real page listed that header button as a candidate
+    // to send with, and only its position kept it from being clicked.
+    const isPos = /\b(send|submit|ask|arrow)\b/i.test(full)
+      || btn.type === 'submit' || btn.getAttribute('type') === 'submit';
     const r = typeof btn.getBoundingClientRect === 'function' ? btn.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0 };
     const near = r.y >= (inputRect.y - 120) && r.y <= (inputRect.y + inputRect.height + 350);
     return { btn, full, isNeg, isPos, near, r };
@@ -450,8 +468,8 @@ export async function askInPage(cfg) {
     // — which every agent prompt does — the comparison never matched, so
     // the composer always looked empty and every send looked successful,
     // including the ones that never left.
-    const val = norm(input.value || input.innerText || '');
-    const promptLead = norm(cfg.prompt).slice(0, 20);
+    const val = visibleText(input.value || input.innerText || '');
+    const promptLead = visibleText(cfg.prompt).slice(0, 20);
     return val.length > 0 && promptLead.length > 0 && val.includes(promptLead);
   };
 
@@ -474,10 +492,10 @@ export async function askInPage(cfg) {
    * exactly when that stays true for a message that did in fact arrive —
    * so latency alone would provoke a second copy of it.
    */
-  const promptTail = norm(cfg.prompt).slice(-60);
+  const promptTail = visibleText(cfg.prompt).slice(-60);
   const countIn = (el) => {
     if (!el || !promptTail) return 0;
-    try { return norm(el.innerText || '').split(promptTail).length - 1; } catch { return 0; }
+    try { return visibleText(el.innerText).split(promptTail).length - 1; } catch { return 0; }
   };
   const promptEchoed = () => {
     if (!promptTail) return false;
@@ -568,7 +586,12 @@ export async function askInPage(cfg) {
       // The exact signal: we watched it generate, and it has stopped. Two
       // consecutive absences, so a re-render that briefly drops the control
       // does not end the turn early.
-      const finished = trustStop && wait.sawStop && goneFor >= TICK * 2;
+      // The stop control going away is not the end of the answer. On the
+      // real page it vanished at 4.2 seconds while the text went on growing
+      // until 5.2 — so treating its disappearance as the finish truncated
+      // the last second of every reply. It must also have stopped growing.
+      const finished = trustStop && wait.sawStop && goneFor >= TICK * 2
+        && sinceGrowth > Math.min(cfg.quietMs, 1200);
       // The fallback, used whenever there is no trustworthy busy signal —
       // either none was ever seen, or the one on screen was already there.
       const quiet = (strayStop || !wait.sawStop) && sinceGrowth > cfg.quietMs;
@@ -755,7 +778,15 @@ export async function askInPage(cfg) {
     contenteditable: el.getAttribute('contenteditable') || undefined,
   } : undefined);
   try {
+    // The real page has neither MessageListContainer nor role=feed. Its
+    // replies sit in [data-testid="lastChatMessage"] containers, so the
+    // region is found by walking up from one of those.
     const region = document.querySelector('[data-testid="MessageListContainer"], [role="feed"]')
+      || (() => {
+        const msgs = [...document.querySelectorAll('[data-testid="lastChatMessage"], [id^="response-id"]')];
+        const last = msgs[msgs.length - 1];
+        return last ? (last.parentElement || last) : null;
+      })()
       || (winner && winner.el && winner.el.closest('[id*="message" i], [class*="message" i]'))
       || document.body;
     // The turns usually sit one or two wrappers below the region; index the

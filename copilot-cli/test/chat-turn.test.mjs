@@ -254,3 +254,54 @@ test('the answer is never our own prompt echoed back', async () => {
     assert.equal(res.text, '');
   } finally { restore(); }
 });
+
+test('an editor that anchors with zero-width characters still sends', async () => {
+  // OBSERVED, from a recording of the real page: inserting the four letters
+  // "ping" left six characters in the composer. Rich editors anchor their
+  // selection with zero-width characters, which are not whitespace, so the
+  // text never compared equal to the prompt and every turn was refused —
+  // and reported as though the page were still generating.
+  const restore = installGlobals();
+  try {
+    resetDom();
+    const feed = new El('div', { role: 'feed' });
+    doc.body.append(new El('div', { 'data-testid': 'MessageListContainer' })).append(feed);
+    const input = new El('span', { id: 'ed', role: 'textbox', contenteditable: 'true' });
+    input.rect = { x: 0, y: 800, width: 700, height: 27 };
+    doc.body.append(new El('div', { class: 'composer' })).append(input);
+    doc._editor = input;
+
+    // The editor wraps whatever is typed in zero-width anchors.
+    const realSetText = input.setText ? input.setText.bind(input) : null;
+    Object.defineProperty(input, 'innerText', {
+      get() {
+        const raw = this.children.length
+          ? this.children.map((c) => c.innerText).filter((t) => t !== '').join('\n')
+          : this._text;
+        return raw ? `​${raw}​` : raw;
+      },
+      set(v) { this.children = []; this._text = v; },
+      configurable: true,
+    });
+    void realSetText;
+
+    let received = null;
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      received = input.innerText;
+      input.textContent = '';
+      const t = new El('div', { 'data-testid': 'copilot-message-div' });
+      const md = new El('div', { 'data-testid': 'markdown-reply' });
+      md.append(new El('p', {}, 'hello back'));
+      t.append(md);
+      feed.append(t);
+    });
+
+    const res = await askInPage({ ...CFG, prompt: 'hi' });
+    assert.equal(res.notSent, undefined, 'a message must not be refused over invisible characters');
+    assert.ok(received, 'the page should have received the message');
+    assert.equal(res.debug.composer.matched, true);
+    assert.equal(res.text, 'hello back');
+  } finally { restore(); }
+});

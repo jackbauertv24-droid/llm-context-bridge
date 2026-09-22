@@ -201,8 +201,12 @@ async function askPage(cdp, full) {
   // Nothing was sent because the page was working. Do not retry: waiting is
   // the whole point, and the caller stops.
   if (res && res.notSent) {
-    note('[bridge] the page was still generating a previous response, so nothing was sent.');
-    note('[bridge] let it finish in Chrome, then run this again.');
+    // The reason, not a guess at it. This printed 'still generating' for
+    // every refusal including one caused by the composer holding invisible
+    // characters, which sent two builds chasing the wrong fault.
+    note('[bridge] nothing was sent. ' + (res.method || 'no reason recorded'));
+    if (res.busy) note('[bridge] let the current response finish in Chrome, then run this again.');
+    if (res.badComposer) note('[bridge] that is a bug here, not something you can fix; send copilot-cli-lastturn.txt.');
     return null;
   }
 
