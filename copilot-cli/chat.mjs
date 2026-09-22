@@ -729,11 +729,11 @@ async function runRecord(cdp, args) {
     note(`stop appeared at:    ${rec.turn.stopAppearedAt === null ? 'never' : rec.turn.stopAppearedAt + 'ms'}`);
     note(`stop went away at:   ${rec.turn.stopGoneAt === null ? 'never' : rec.turn.stopGoneAt + 'ms'}`);
     note(`answer node at:      ${rec.turn.answerAppearedAt === null ? 'never' : rec.turn.answerAppearedAt + 'ms'}`);
-    note(`answer text:         ${JSON.stringify((rec.turn.lastAnswerText || '').slice(0, 90))}`);
+    note(`answer size:         ${rec.turn.lastAnswerChars} characters`);
   }
   note('');
   note('[record] written to copilot-cli-page-record.json — send me that file.');
-  note('[record] it holds one short exchange; redact it if you would rather.');
+  note('[record] it holds no text from your conversation — shapes, counts and timings only.');
   return true;
 }
 

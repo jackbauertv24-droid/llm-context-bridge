@@ -12,6 +12,13 @@
 // whoever is fixing this, and to become a fixture the tests run against, so
 // that the replica is answerable to the page rather than to an idea of it.
 //
+// NOTHING OF THE CONVERSATION IS RECORDED. Element shapes, selectors,
+// attributes, geometry, counts and timings — all of which are needed — and
+// text only ever as a length. The single string in the output is the probe
+// word this code types itself. The bridge behaves identically whichever
+// skill is in use, so nothing about mail or Confluence is needed here, and a
+// file the user is asked to send on must not carry their correspondence.
+//
 // It sends exactly one short message, because half of what matters can only
 // be seen during a turn: whether the composer empties, whether a stop
 // control appears, how the answer arrives, how fast the page churns when
@@ -56,7 +63,12 @@ export async function recordPage(cfg) {
     disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
     visible: vis(el),
     rect: (() => { try { const r = el.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }; } catch { return null; } })(),
-    text: norm(el.innerText || '').slice(0, 80) || undefined,
+    // The LENGTH of the text, never the text. What is being diagnosed is
+    // the shape and timing of the page, and those are numbers. The content
+    // of the conversation belongs to the user — and if a mail or Confluence
+    // turn happened earlier in the same thread, it is their mail and their
+    // documents sitting in a file they are about to send on.
+    textLength: norm(el.innerText || '').length || undefined,
   } : null);
 
   // Every read of the environment is guarded. A recorder that throws on a
@@ -174,12 +186,17 @@ export async function recordPage(cfg) {
   await sleep(150);
 
   // The single most useful fact: did one insert produce one copy of the text?
+  // The only string in this file, and it is ours: the probe word typed by
+  // this code a moment ago. Comparing it back is how a doubled insert is
+  // detected. Anything unexpected is reported as a length, not quoted.
+  const held = norm(input.value || input.innerText || '');
   out.insert = {
     asked: probePrompt,
-    got: norm(input.value || input.innerText || ''),
-    doubled: norm(input.value || input.innerText || '') === probePrompt + probePrompt,
+    got: (held === probePrompt || held === probePrompt + probePrompt) ? held : '(unexpected; see gotLength)',
+    gotLength: held.length,
+    doubled: held === probePrompt + probePrompt,
   };
-  mark('text inserted', { holds: out.insert.got });
+  mark('text inserted', { chars: held.length });
 
   const keydownTaken = safe(() => !input.dispatchEvent(new KeyboardEvent('keydown', {
     key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
@@ -230,7 +247,8 @@ export async function recordPage(cfg) {
   // The answer text, so extraction can be checked too.
   const finalAnswers = cfg.answerSelector ? [...document.querySelectorAll(cfg.answerSelector)] : [];
   out.turn.lastAnswer = describe(finalAnswers[finalAnswers.length - 1]);
-  out.turn.lastAnswerText = norm((finalAnswers[finalAnswers.length - 1] || {}).innerText || '').slice(0, 400);
+  // How much came back, not what.
+  out.turn.lastAnswerChars = norm((finalAnswers[finalAnswers.length - 1] || {}).innerText || '').length;
 
   return out;
 }
