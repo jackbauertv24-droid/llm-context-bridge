@@ -107,6 +107,7 @@ test('renderSystemPrompt for files skill includes mutation guidance and code per
   assert.match(prompt, /<copilot:read path="src\/index\.js"\/>/);
   assert.match(prompt, /WHEN NOT TO CHANGE ANYTHING/);
   assert.match(prompt, /write replaces the whole file/);
+  assert.match(prompt, /The workspace root is \/mock\/root/);
   assert.doesNotMatch(prompt, /READ-ONLY MODE/);
 });
 
@@ -119,9 +120,10 @@ test('renderSystemPrompt for mail skill enforces strict read-only mode and drops
   assert.match(prompt, /<copilot:mail days="7"\/>/);
   assert.match(prompt, /READ-ONLY MODE/);
   assert.match(prompt, /All tools in this session are strictly read-only/);
-  // Crucial security check: file mutation instructions must not be present in mail-only prompt!
+  // Security & cleanliness checks
   assert.doesNotMatch(prompt, /write replaces the whole file/);
   assert.doesNotMatch(prompt, /WHEN NOT TO CHANGE ANYTHING/);
+  assert.doesNotMatch(prompt, /The workspace root is/);
 });
 
 test('formatSkillsList lists registered skills and status', () => {
@@ -177,6 +179,12 @@ test('renderSystemPrompt for confluence skill enforces read-only mode and drops 
   assert.match(prompt, /All tools in this session are strictly read-only/);
   assert.doesNotMatch(prompt, /write replaces the whole file/);
   assert.doesNotMatch(prompt, /WHEN NOT TO CHANGE ANYTHING/);
+  assert.doesNotMatch(prompt, /The workspace root is/);
+
+  // RULES section must not duplicate tool definitions (only sampleTag should appear)
+  const rulesSection = prompt.split('RULES')[1];
+  const ruleTags = (rulesSection.match(/<copilot:confluence_/g) || []);
+  assert.equal(ruleTags.length, 1, 'Only sample tag should appear in RULES, no redundant tool definitions');
 });
 
 test('askInPage module exports valid executable function', () => {

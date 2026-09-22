@@ -364,7 +364,7 @@ export async function probeEwsSearch(cfg, { days }) {
 export function mailTools(cfg) {
   return {
     mail: {
-      summary: 'read recent mail (read-only; never marks anything as read, never sends)',
+      summary: 'read recent mail messages',
       usage: '<copilot:mail days="10" folder="INBOX" limit="25" from="" subject="" unread="false"/>',
       describe: (a) => {
         const bits = [`last ${a.days || cfg.days} days`];

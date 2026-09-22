@@ -66,11 +66,7 @@ export const mailSkill = {
     const cfg = ctx.mailConfig || loadMailConfig({ root: ctx.root, envPath: ctx.mailEnv });
     return mailTools(cfg);
   },
-  promptRules: [
-    '- Mail tools are strictly read-only. You cannot send, reply, forward, or mark any mail as read.',
-    '- Use <copilot:mail days="..."/> to search recent messages. You can filter by folder, from, or subject.',
-    '- Use <copilot:mailboxes/> to list folder names on the server.',
-  ],
+  promptRules: [],
 };
 
 // Planned / staged connectors for future extension:
@@ -86,9 +82,7 @@ export const logsSkill = {
     reason: 'connector in development; see documentation for planned operations',
   }),
   getTools: () => ({}),
-  promptRules: [
-    '- Log tools are strictly read-only parameter-driven queries. No arbitrary shell execution.',
-  ],
+  promptRules: [],
 };
 
 export const teamsSkill = {
@@ -103,9 +97,7 @@ export const teamsSkill = {
     reason: 'connector in development; see documentation for planned operations',
   }),
   getTools: () => ({}),
-  promptRules: [
-    '- Teams tools are strictly read-only.',
-  ],
+  promptRules: [],
 };
 
 export const confluenceSkill = {
@@ -124,13 +116,7 @@ export const confluenceSkill = {
     if (ctx && !ctx.confluenceClient) ctx.confluenceClient = client;
     return confluenceTools(client);
   },
-  promptRules: [
-    '- Confluence tools are strictly read-only. You cannot create, edit, or delete wiki pages.',
-    '- Use <copilot:confluence_search query="..." [space="..."] [limit="5"]/> to search articles.',
-    '- Use <copilot:confluence_read id="..."/> (or title="...") to view the full page text.',
-    '- Use <copilot:confluence_spaces/> to list available space keys.',
-    '- Report documentation findings and summaries in prose.',
-  ],
+  promptRules: [],
 };
 
 /**

@@ -610,7 +610,7 @@ export function confluenceTools(client = new ConfluenceClient()) {
     },
 
     confluence_read: {
-      summary: 'Read a Confluence page by ID or title (strictly read-only)',
+      summary: 'Read a Confluence page by ID or title',
       usage: '<copilot:confluence_read id="123456" [title="Page Title"]/>',
       body: false,
       mutates: false,

@@ -166,10 +166,13 @@ export function renderSystemPrompt(root, tools = defaultTools, { skills = null }
     );
   }
 
-  lines.push(
-    '',
-    `The workspace root is ${root}`,
-  );
+  const hasWorkspaceSkill = !activeSkills || activeSkills.some((s) => s.domain === 'code');
+  if (hasWorkspaceSkill) {
+    lines.push(
+      '',
+      `The workspace root is ${root}`,
+    );
+  }
   return lines.join('\n');
 }
 
