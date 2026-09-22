@@ -267,12 +267,17 @@ export function stripFences(text) {
 export function parseToolTags(text, tools = defaultTools) {
   const src = stripFences(text);
   const calls = [];
+  calls.unknown = [];
   OPEN.lastIndex = 0;
   let m;
   while ((m = OPEN.exec(src))) {
     const [full, name, attrs, selfClose] = m;
     const tool = tools[name];
-    if (!tool) continue;
+    // A well-formed tag naming a tool that does not exist used to be dropped
+    // without trace, so a single invented name — confluence_query for
+    // confluence_search — ended the turn looking like prose. It is recorded
+    // instead, and the loop turns it into a correction the model can act on.
+    if (!tool) { calls.unknown.push(name); continue; }
 
     if (selfClose || !tool.body) {
       calls.push({ name, args: parseAttrs(attrs), body: '' });
@@ -383,6 +388,20 @@ export async function runAgent({
     if (prose) ui.prose(prose);
 
     const calls = parseToolTags(reply, tools);
+    // A tag that named nothing real is a near miss, not an ending. Telling
+    // the model which names exist costs one step and usually recovers,
+    // where stopping costs the whole run.
+    if (!calls.length && calls.unknown && calls.unknown.length) {
+      const known = Object.keys(tools).join(', ');
+      if (ui.unknownTag) ui.unknownTag(calls.unknown, known);
+      prompt = [
+        `<${NS}:result tool="${calls.unknown[0]}" status="error">`,
+        `There is no tool called "${calls.unknown.join('", "')}". The tools that exist are: ${known}.`,
+        'Re-send using one of those names, spelled exactly.',
+        `</${NS}:result>`,
+      ].join('\n');
+      continue;
+    }
     // Tag-shaped text that was not in column one is passed over. Say so
     // whether or not anything else ran: silence here would leave the user
     // wondering why a file they were just told about never changed. Strict is

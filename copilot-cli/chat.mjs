@@ -272,6 +272,10 @@ function agentUI() {
     toolError: (label, msg) => note(`[agent] ${label} — FAILED: ${msg}`),
     skipped: (label) => note(`[agent] ${label} — skipped`),
     ignored: (n) => note(`[agent] ignored ${n} tag-like mention${n === 1 ? '' : 's'} that were not at the start of a line`),
+    unknownTag: (names, known) => {
+      note(`[agent] the model asked for a tool that does not exist: ${names.join(', ')}`);
+      note(`[agent] telling it the real names (${known}) and letting it retry.`);
+    },
   };
 }
 
