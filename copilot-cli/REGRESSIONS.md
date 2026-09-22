@@ -1,0 +1,89 @@
+# What has broken, and what stops it breaking again
+
+Every defect in this list reached the user. Most of them reached the user
+because a check existed that agreed with the bug — the replica the tests ran
+against was written from the same wrong belief as the code. This file is the
+ledger: the symptom as it was actually seen, the cause, and the thing that
+now catches it.
+
+Its purpose is to be read before changing the send path, the wait, or the tag
+grammar, because several of these were reintroduced by a later fix.
+
+`ok` in the last column means a behavioural check fails if the fix is removed.
+`code` means the guard is structural — an assertion or an allow-list that
+throws — with no separate check.
+
+## Sending a message
+
+| Symptom seen | Cause | Guard | Covered |
+|---|---|---|---|
+| The same prompt appeared in the chat twice, every turn | `Enter` then `Ctrl+Enter` fired back to back with nothing checked between | attempt two only runs after attempt one is seen to fail | ok |
+| A single-line prompt could be sent ~30 times | one "click" dispatched a MouseEvent, called `click()`, clicked the button's first child and called `form.requestSubmit()` — inside a loop | `activate()` performs exactly one activation; the loop is gone | ok |
+| A page with handlers on `keydown` and `keypress` submitted twice | all three key events fired unconditionally | `keypress` only if the `keydown` was not consumed; the shim honours `preventDefault` so this is testable | ok |
+| Typing `Blast` sent `BlastBlast` | a synthetic `beforeinput` carrying the text *and* `execCommand('insertText')`, each inserting all of it | inserted once; `debug.composer.corrected` distinguishes a clean insert from a repaired one | ok |
+| A two-letter `hi` was refused as "the page was still generating" | the editor pads what is typed with zero-width anchors, which are not whitespace, so the composer never compared equal to the prompt | comparison ignores zero-width and bidi marks | ok |
+| Nothing sent, and the reason named the wrong cause | every refusal printed "still generating" whatever had happened | refusals report `res.method`, their own reason | ok |
+
+## Deciding when to send, and when it is finished
+
+| Symptom seen | Cause | Guard | Covered |
+|---|---|---|---|
+| Messages sent into a page that was visibly still answering | the wait timed out after 30s and then sent anyway | it refuses instead; `PREFLIGHT_MS=0` opts out | ok |
+| Every message refused, permanently, on a live page | "is it busy" watched for any DOM mutation, and every real page mutates constantly | busy means the *text is growing*, not that the DOM changed | ok |
+| A turn took the full answer timeout on a live page | same assumption in the wait for the answer | the quiet rule uses growth too | ok |
+| The last second of every reply was missing | the stop control disappears before the answer finishes — measured at 4237ms with text still arriving at 5239ms | finishing also requires growth to have stopped | ok |
+| A turn hung for two minutes on a stuck control | the stale net needed only 3× the quiet period | 30-second floor, and a control present before the send is distrusted | ok |
+| A slow accept was treated as a failed send, and duplicated | delivery was judged by the composer emptying | delivery is proved by the prompt appearing in the conversation | ok |
+| Our own prompt returned as the answer — which for the agent means executing the example tags in its own instructions | the echo scored best when nothing else had arrived | an echo is refused and reported | ok |
+
+## Not overwhelming the backend
+
+| Symptom seen | Cause | Guard | Covered |
+|---|---|---|---|
+| The same prompt re-sent every 4s, indefinitely | the busy branch decremented the step counter and continued, so the loop never advanced | bounded retries with 5s/10s/20s backoff, then stop | code |
+| One busy page cost a dozen submissions | `askPage` retried busy *and* the agent loop retried busy — two layers multiplying | the agent loop owns it; `askPage` reports and returns | code |
+| Being rate-limited provoked more requests | throttling was treated as retryable | throttle phrases end the run immediately | code |
+| — | nothing bounded the total | every message passes one function: budget per run, minimum interval, printed on attach | code |
+
+## The agent protocol
+
+| Symptom seen | Cause | Guard | Covered |
+|---|---|---|---|
+| Confluence tools could never be called; the turn ended as prose | the tag grammar's name pattern excluded the underscore in `confluence_search` | names allow `_` and digits; `assertToolNames` throws at prompt build | code |
+| The model was taught to emit `[limit="5"]`, which never parses | optional arguments written in prose notation in the usage examples | `assertToolUsage` requires each tool's own example to parse back to it | code |
+| An invented tool name ended the run silently | a well-formed tag naming nothing was dropped without trace | unknown names are collected and turned into a correction the model can act on | code |
+| A run reported success when the reply could not be read | the loop returned `done: true` whenever no calls parsed | a reply is accounted for; tag-shaped text that produced no call is not success | code |
+| Asked for a code review, it offered to edit files | the parser executed tags mentioned in prose | tags must start in column one | code |
+
+## Reading mail and Confluence
+
+| Symptom seen | Cause | Guard | Covered |
+|---|---|---|---|
+| "No mail in the last 3 days" from a 5816-message inbox | a greedy attribute group ate the slash of `<t:ItemId …/>`, so every message was skipped | lazy group; an unterminated tag is skipped rather than ending the scan | code |
+| An empty result could not be told from a parse failure | nothing counted the stages | matched / parsed / fetched / kept are counted and a sentence names the stage that lost them | code |
+| Every search result said `space: none` | CQL search does not expand `space` unless asked | expanded, with the key also derived from the page link | code |
+| Tool output contained a live tag with a placeholder that parses | the search result suggested `<copilot:confluence_read id="<id>"/>` | described in prose instead | code |
+| Mail could have been marked read | — | `EXAMINE` not `SELECT`, `BODY.PEEK[]` not `BODY[]`, `[READ-ONLY]` confirmed, deny list; EWS has an allow-list of three read operations | code |
+| A password sat in a log meant to be shown | redacted only at the point of printing | redacted where it is recorded | code |
+
+## Diagnostics
+
+| Symptom seen | Cause | Guard | Covered |
+|---|---|---|---|
+| The page recording carried the user's mail | it stored 80 characters of every element's text and 400 of the last answer | text is recorded only as a length; a check builds a page full of secrets and requires none survive | ok |
+| Ten commits shipped under a stale build number | the version lived in one file that changes rarely | one exported constant, imported everywhere, printed by every diagnostic | code |
+| A safety line claimed "all of them are reads" when nothing had been sent | the summary did not check whether any request happened | it says nothing was sent | code |
+
+## The lesson that produced most of this file
+
+Three separate builds were declared fixed, handed over, and failed
+immediately. In each case the replica the checks ran against had been written
+from the same belief that was wrong in the code — that the composer empties
+on send, that a visible stop control means a response is in flight, that the
+DOM falls quiet when an answer ends. Plausible, all of them. None true of the
+real page.
+
+`chat.mjs --record` now writes down what the page actually is and does, and
+`test/recorded-page.test.mjs` builds the test page from that file rather than
+from an argument. Both builds handed over on the day it was added fail all
+four of its checks.

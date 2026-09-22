@@ -504,6 +504,13 @@ node chat.mjs --confluence-check
 
 This probes the Confluence REST v1 API, prototype search, quicksearch, and spaces endpoints, tests a sample retrieval, writes a full report to `copilot-cli-confluence-check.txt`, and names the selected working strategy.
 
+## What has broken before
+
+[REGRESSIONS.md](REGRESSIONS.md) is the ledger: every defect that reached a
+user, what caused it, and what now catches it. Several were reintroduced by a
+later fix, so it is worth reading before changing the send path, the wait, or
+the tag grammar.
+
 ## When an answer still comes out wrong
 
 Every turn writes two files. `copilot-cli-lastturn.txt` is small and
