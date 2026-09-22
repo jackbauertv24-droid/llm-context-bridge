@@ -81,21 +81,67 @@ export async function askInPage(cfg) {
   // A turn that never happens costs nothing; one sent into a busy service
   // may cost the account.
   const preflightLimit = Number(cfg.preflightMs || 60000);
+  // How long the page must be completely still before "a stop control is
+  // visible" stops meaning "it is generating". A page that is genuinely
+  // producing an answer changes constantly; one that is finished does not,
+  // whatever is left on screen.
+  const busyQuietMs = Number(cfg.busyQuietMs || 3000);
+
+  // The element that matched, so a false positive can be identified and
+  // pinned with STOP_SELECTOR instead of guessed at.
+  const describeStop = (el) => {
+    if (!el) return '(none)';
+    try {
+      const bits = [
+        pathOf(el),
+        el.getAttribute('aria-label') ? `aria="${el.getAttribute('aria-label')}"` : '',
+        el.getAttribute('title') ? `title="${el.getAttribute('title')}"` : '',
+        el.getAttribute('data-testid') ? `testid="${el.getAttribute('data-testid')}"` : '',
+        el.disabled || el.getAttribute('aria-disabled') === 'true' ? 'disabled' : '',
+      ].filter(Boolean);
+      return bits.join(' ');
+    } catch { return '(could not describe it)'; }
+  };
+
+  // Activity during the wait, so the two cases can be told apart at all.
+  // Without this, a control that merely contains the word "stop" and is
+  // always on screen reads identically to a response in flight — and that
+  // refused to send anything at all, which is worse than the fault it was
+  // added to prevent.
+  let preLastMutation = Date.now();
+  let preObs = null;
+  try {
+    preObs = new MutationObserver(() => { preLastMutation = Date.now(); });
+    preObs.observe(document.body, { subtree: true, childList: true, characterData: true });
+  } catch { /* without it the quiet test below simply passes */ }
+  const stillMoving = () => Date.now() - preLastMutation < busyQuietMs;
+
   const preflightStart = Date.now();
   let preflightLogged = false;
-  while (stopNow() && (Date.now() - preflightStart < preflightLimit)) {
-    // Logged once rather than sixty times, and the total is recorded below:
-    // a stop control that is stuck visible costs this wait on every single
-    // turn, and that needs to be visible in the diagnostics rather than felt
-    // as unexplained slowness.
-    if (!preflightLogged) { log('a previous response is still streaming; waiting for it'); preflightLogged = true; }
+  const firstStop = stopNow();
+  while (stopNow() && stillMoving() && (Date.now() - preflightStart < preflightLimit)) {
+    if (!preflightLogged) {
+      log(`a response looks to be in flight; waiting. Stop control: ${describeStop(stopNow())}`);
+      preflightLogged = true;
+    }
     await sleep(500);
   }
   const preflightMs = Date.now() - preflightStart;
+  const stopStillThere = !!stopNow();
   const preflightTimedOut = preflightMs >= preflightLimit;
-  if (preflightMs > 200) log(`waited ${preflightMs}ms for the page to go idle`);
+  try { if (preObs) preObs.disconnect(); } catch { /* going away anyway */ }
 
-  if (preflightTimedOut && stopNow()) {
+  if (preflightMs > 200) log(`waited ${preflightMs}ms for the page to go idle`);
+  if (firstStop && stopStillThere && !stillMoving()) {
+    // Present, but the page has not moved. This is the case that blocked a
+    // plain "hi" from being sent at all.
+    log(`a control matches the stop selector but the page has been still for `
+      + `${Date.now() - preLastMutation}ms, so it is not generating: ${describeStop(stopStillThere ? stopNow() : null)}`);
+    log('if this is wrong, pin the real one with STOP_SELECTOR');
+  }
+  debug.stopControl = { matched: !!firstStop, description: describeStop(firstStop), stillThere: stopStillThere };
+
+  if (preflightTimedOut && stopStillThere && stillMoving()) {
     // Still working after the full wait. Refuse, and say so: the caller can
     // stop, and nothing was added to the conversation.
     log(`the page was still generating after ${preflightMs}ms; refusing to send`);
@@ -118,6 +164,7 @@ export async function askInPage(cfg) {
 
   // 3. set text
   input.focus();
+  let composerCorrected = false;
   // Leftovers from a previous turn would be sent along with this prompt.
   const clearComposer = () => {
     if (!input.isContentEditable) {
@@ -161,6 +208,12 @@ export async function askInPage(cfg) {
     // and the doubling above went unnoticed because the old check used
     // !== on trimmed text and then *appended* a correction.
     if (norm(input.innerText || '') !== norm(cfg.prompt)) {
+      // Repairing this is a safety net, not a success. Recorded, because a
+      // silent repair hides the fault that made it necessary: the doubled
+      // insert was corrected here and so looked fine from the outside.
+      composerCorrected = true;
+      log(`the first insert produced ${norm(input.innerText || '').length} characters `
+        + `where ${norm(cfg.prompt).length} were expected; setting the text directly`);
       clearComposer();
       input.textContent = cfg.prompt;
       try {
@@ -184,7 +237,7 @@ export async function askInPage(cfg) {
   // teaches the model something untrue, so it is not sent.
   const inBox = norm(input.value || input.innerText || '');
   const wanted = norm(cfg.prompt);
-  debug.composer = { expected: wanted.length, actual: inBox.length, matched: inBox === wanted };
+  debug.composer = { expected: wanted.length, actual: inBox.length, matched: inBox === wanted, corrected: composerCorrected };
   if (inBox !== wanted) {
     const doubled = inBox.length >= wanted.length * 2 && inBox.startsWith(wanted);
     log(`the composer holds ${inBox.length} characters where ${wanted.length} were expected`
@@ -258,7 +311,13 @@ export async function askInPage(cfg) {
   // Visibility is checked, not just presence: a stop control left in the DOM
   // but hidden would otherwise read as "still generating" until the timeout.
   const TICK = 100;
-  const wait = { via: 'timeout', sawStop: false, ms: 0, selector: stopSelector, preflightMs, preflightTimedOut, inputWaitMs };
+  // Recorded before the send, so the wait below knows whether the control it
+  // sees belongs to this turn or was there all along.
+  const strayStop = !!firstStop;
+  const wait = {
+    via: 'timeout', sawStop: false, ms: 0, selector: stopSelector,
+    preflightMs, preflightTimedOut, inputWaitMs, strayStop,
+  };
   let goneFor = 0;
 
   // Attempt one, and only one. Ctrl+Enter used to be fired immediately
@@ -468,12 +527,21 @@ export async function askInPage(cfg) {
       const newBlock = answerBlocks().some((el) => !baseSet.has(el));
       const grew = newBlock || document.body.innerText.length > bodyBaseLen + cfg.prompt.length + 20;
 
+      // A control that was already on screen before we sent anything cannot
+      // be telling us about the answer we just asked for. Trusting it meant
+      // that on a page carrying a permanent one — "Stop sharing", say — the
+      // turn could never end by the exact signal, the quiet fallback was
+      // suppressed because a control had been seen, and every turn ran to
+      // the full answer timeout. Two minutes, every time.
+      const trustStop = !strayStop;
+
       // The exact signal: we watched it generate, and it has stopped. Two
       // consecutive absences, so a re-render that briefly drops the control
       // does not end the turn early.
-      const finished = wait.sawStop && goneFor >= TICK * 2;
-      // The fallback, for a page that never showed a stop control at all.
-      const quiet = !wait.sawStop && Date.now() - lastMutation > cfg.quietMs;
+      const finished = trustStop && wait.sawStop && goneFor >= TICK * 2;
+      // The fallback, used whenever there is no trustworthy busy signal —
+      // either none was ever seen, or the one on screen was already there.
+      const quiet = (strayStop || !wait.sawStop) && Date.now() - lastMutation > cfg.quietMs;
       // And a safety net: a stop control that is still there long after the
       // page stopped changing is stale, not generating. Without this the turn
       // would sit until the answer timeout -- two minutes for a page that
@@ -485,7 +553,7 @@ export async function askInPage(cfg) {
       // was cut off and its half-written reply taken as final. Thirty
       // seconds of complete silence is stuck; five is slow.
       const staleAfter = Math.max(cfg.quietMs * 3, 30000);
-      const stale = wait.sawStop && Date.now() - lastMutation > staleAfter;
+      const stale = trustStop && wait.sawStop && Date.now() - lastMutation > staleAfter;
 
       if (grew && (finished || quiet || stale)) {
         wait.via = finished ? 'stop-control-gone' : stale ? 'stale-stop-control' : 'quiet';
@@ -516,7 +584,9 @@ export async function askInPage(cfg) {
   wait.pageIdleAtEnd = wait.via === 'stop-control-gone' || (wait.via === 'quiet' && !stopNow());
   // With no stop control ever seen, there is no busy signal on this page at
   // all, so the wait before sending is blind. Worth knowing, once.
-  wait.noBusySignal = !wait.sawStop;
+  // No usable busy signal: either nothing matched, or what matched was
+  // already there and so says nothing about this turn.
+  wait.noBusySignal = !wait.sawStop || strayStop;
   debug.wait = wait;
   log(`waited ${wait.ms}ms, ended via ${wait.via}${wait.sawStop ? '' : ' (no stop control was ever visible)'}`);
   obs.disconnect();
