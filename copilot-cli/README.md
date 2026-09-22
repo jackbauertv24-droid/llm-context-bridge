@@ -164,6 +164,7 @@ selector tweak, not a rewrite.
 | `lib-files.mjs` | `@path` expansion into attachment blocks |
 | `lib-agent.mjs` | The agent loop and tool-tag protocol (ported from clichat) |
 | `lib-skills.mjs` | Domain-scoped skill bundles, registry, and command parser |
+| `lib-confluence.mjs` | Read-only corporate Confluence bridge over CDP with in-tab SSO |
 | `PORTING-BACK-TO-CLICHAT.md` | The fixes found here that clichat still needs |
 | `lib-fstools.mjs` | read / write / list / edit, confined to one directory |
 | `lib-mailtool.mjs` | the mail tools, their settings and redaction |
@@ -183,6 +184,7 @@ the same problem against a different backend.
 ```sh
 node chat.mjs --agent "add a --version flag to cli.js"
 node chat.mjs --agent:mail "summarise unread emails"
+node chat.mjs --agent:confluence "find architecture overview"
 node chat.mjs --agent "..." --root ../myproject --yes
 ```
 
@@ -199,16 +201,17 @@ isolated into domain bundles:
 |---|---|---|---|
 | `files` (or `code`) | Coding | `read`, `list`, `write`, `edit` | **Default** for `/agent`. Confined to `--root`. |
 | `mail` | Agenda | `mail`, `mailboxes` | **Strictly read-only**. No write tools in prompt. |
+| `confluence` (or `wiki`) | Knowledge | `confluence_search`, `confluence_read`, `confluence_spaces` | **Strictly read-only**. Connects to authenticated Chrome tab. |
 | `logs` | Ops | `log.tail`, `log.grep` | (Planned) Read-only SSH log access. |
 | `teams` | Collab | `teams.search` | (Planned) Read-only chat search. |
-| `confluence` | Knowledge | `wiki.get` | (Planned) Read-only corporate wiki. |
 
 Use them in the REPL or CLI:
 
 ```sh
 /agent <task>              # coding agent (files only, default)
 /agent:mail <task>         # read-only mail agent (no file write/edit tools in prompt)
-/agent +mail <task>        # compose coding + mail reading together
+/agent:confluence <task>   # read-only Confluence knowledge base search
+/agent +confluence <task>  # coding agent + Confluence reading combined
 /agent:all <task>          # all active configured skills
 /skills                    # view status of all registered skills
 /new (or /reset)           # reset session and clear primed prompt context
@@ -216,8 +219,8 @@ Use them in the REPL or CLI:
 
 CLI flags:
 ```sh
-node chat.mjs --agent:mail "summarise unread"
-node chat.mjs --agent "summarise" --skills files,mail
+node chat.mjs --agent:confluence "find deployment runbook"
+node chat.mjs --agent "implement auth" --skills files,confluence
 ```
 
 The grammar is a tag with a **raw body**, not JSON, because the thing an agent
@@ -461,6 +464,45 @@ file.
 | `MAIL_MAX_BODY` / `MAIL_MAX_TOTAL` | 2000 / 40000 | Characters per message, and in total. |
 | `MAIL_FETCH_BYTES` | 65536 | IMAP only: how much of each message is downloaded. |
 | `MAIL_REDACT` | on | Strip secrets before sending. `0` disables. |
+
+## Reading Confluence Knowledge Base (via Chrome SSO Tab)
+
+The agent can search your corporate Confluence site and read full wiki articles:
+
+```sh
+node chat.mjs --agent:confluence "find the deployment process and release schedule"
+```
+
+```
+<copilot:confluence_search query="deployment runbook" space="DEV" limit="5"/>
+<copilot:confluence_read id="123456"/>
+<copilot:confluence_spaces/>
+```
+
+### Zero credentials, automatic SSO bypass
+
+Corporate wikis typically sit behind Okta, SAML, Azure AD, or Kerberos. Instead of attempting brittle token interception, `copilot-cli` leverages your existing Chrome session:
+
+1. Open your corporate Confluence site in your Chrome debug window (`port 9222`) and log in once.
+2. The bridge finds the tab and evaluates queries (`fetch`) inside the tab context, automatically inheriting your authenticated session cookies.
+3. No passwords, tokens, or credentials are stored on disk.
+4. Confluence HTML is converted into clean, readable Markdown using the built-in formatter.
+
+### Strictly read-only
+
+Confluence access is enforced as strictly read-only:
+- Only `GET` requests to search and content endpoints are constructed.
+- Creation (`POST`), editing (`PUT`), or deletion (`DELETE`) are prohibited at the protocol level.
+
+### Single-shot diagnostic check
+
+Run the check once to discover your tabs, test in-tab endpoints, and verify setup:
+
+```sh
+node chat.mjs --confluence-check
+```
+
+This probes the Confluence REST v1 API, prototype search, quicksearch, and spaces endpoints, tests a sample retrieval, writes a full report to `copilot-cli-confluence-check.txt`, and names the selected working strategy.
 
 ## When an answer still comes out wrong
 

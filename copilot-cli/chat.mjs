@@ -102,10 +102,16 @@ distraction and protecting against prompt-injection from external text:
 
   /agent <task>              code on files in workspace (default)
   /agent:mail <task>         read-only mail agent (no file write access)
-  /agent +mail <task>        code + mail reading combined
+  /agent:confluence <task>   read-only Confluence knowledge base search
+  /agent +confluence <task>  code + Confluence reading combined
   /agent:all <task>          all active configured skills
   /skills                    list skills and configuration status
   /new or /reset             reset agent session & prompt context
+
+With an authenticated Confluence tab open in Chrome:
+
+  node chat.mjs --confluence-check    probe in-tab endpoints and verify setup
+  node chat.mjs --agent:confluence "find architecture overview"
 
 With mail.env set up, the agent also gets a read-only view of your mail:
 
@@ -583,6 +589,13 @@ async function main() {
   if (args.includes('--mail-check')) {
     takeBool(args, '--mail-check');
     process.exit((await runMailCheck(args)) ? 0 : 1);
+  }
+
+  // Confluence setup and endpoint probe.
+  if (args.includes('--confluence-check')) {
+    takeBool(args, '--confluence-check');
+    const { runConfluenceCheck } = await import('./lib-confluence.mjs');
+    process.exit((await runConfluenceCheck(args)) ? 0 : 1);
   }
 
   const mailEnv = takeFlag(args, '--mail-env');

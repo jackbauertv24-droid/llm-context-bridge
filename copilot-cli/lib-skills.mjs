@@ -7,6 +7,7 @@
 
 import { tools as fileTools } from './lib-fstools.mjs';
 import { mailTools, loadMailConfig } from './lib-mailtool.mjs';
+import { confluenceTools, ConfluenceClient, loadConfluenceConfig } from './lib-confluence.mjs';
 
 /**
  * Skill definition schema:
@@ -109,18 +110,25 @@ export const teamsSkill = {
 
 export const confluenceSkill = {
   id: 'confluence',
-  name: 'Confluence Wiki (Read-Only)',
+  name: 'Corporate Confluence (Read-Only)',
   domain: 'knowledge',
-  summary: 'Search and view corporate Confluence spaces and documentation.',
+  summary: 'Search and read corporate Confluence articles and knowledge base via authenticated Chrome tab.',
   mutates: false,
-  sampleTag: '<copilot:wiki_get page="Architecture-Overview"/>',
+  sampleTag: '<copilot:confluence_search query="architecture overview"/>',
   isAvailable: () => ({
-    available: false,
-    reason: 'connector in development; see documentation for planned operations',
+    available: true,
+    detail: 'requires authenticated Confluence tab in Chrome (port 9222)',
   }),
-  getTools: () => ({}),
+  getTools: (ctx = {}) => {
+    const client = ctx.confluenceClient || new ConfluenceClient(loadConfluenceConfig({ root: ctx.root }));
+    return confluenceTools(client);
+  },
   promptRules: [
-    '- Confluence tools are strictly read-only.',
+    '- Confluence tools are strictly read-only. You cannot create, edit, or delete wiki pages.',
+    '- Use <copilot:confluence_search query="..." [space="..."] [limit="5"]/> to search articles.',
+    '- Use <copilot:confluence_read id="..."/> (or title="...") to view the full page text.',
+    '- Use <copilot:confluence_spaces/> to list available space keys.',
+    '- Report documentation findings and summaries in prose.',
   ],
 };
 
@@ -136,6 +144,9 @@ export class SkillRegistry {
       ['file', 'files'],
       ['fs', 'files'],
       ['email', 'mail'],
+      ['wiki', 'confluence'],
+      ['doc', 'confluence'],
+      ['docs', 'confluence'],
     ]);
   }
 

@@ -7,3 +7,6 @@ mail.env
 copilot-cli-mailcheck.txt
 copilot-cli-lastturn.txt
 copilot-cli-capture.json
+confluence.env
+copilot-cli-confluence-check.txt
+copilot-cli/copilot-cli-confluence-check.txt

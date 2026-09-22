@@ -9,7 +9,9 @@ import {
   formatSkillsList,
   filesSkill,
   mailSkill,
+  confluenceSkill,
 } from '../lib-skills.mjs';
+import { confluenceHtmlToText } from '../lib-confluence.mjs';
 import { renderSystemPrompt } from '../lib-agent.mjs';
 
 test('parseAgentCommand parses standard /agent tasks', () => {
@@ -129,4 +131,49 @@ test('formatSkillsList lists registered skills and status', () => {
   assert.match(output, /logs/);
   assert.match(output, /teams/);
   assert.match(output, /confluence/);
+});
+
+test('confluenceHtmlToText converts HTML into clean markdown', () => {
+  const html = `
+    <div id="main">
+      <h1>API Specification</h1>
+      <p>This is the <b>core</b> documentation.</p>
+      <table>
+        <tr><th>Endpoint</th><th>Method</th></tr>
+        <tr><td>/api/v1/auth</td><td>POST</td></tr>
+      </table>
+      <pre><code>console.log("hello");</code></pre>
+      <ul><li>Item A</li><li>Item B</li></ul>
+      <script>alert("bad");</script>
+    </div>
+  `;
+  const md = confluenceHtmlToText(html);
+  assert.match(md, /# API Specification/);
+  assert.match(md, /This is the core documentation\./);
+  assert.match(md, /\| Endpoint \| Method/);
+  assert.match(md, /\| \/api\/v1\/auth \| POST/);
+  assert.match(md, /```\n`console\.log\("hello"\);`\n```/);
+  assert.match(md, /- Item A\n- Item B/);
+  assert.doesNotMatch(md, /alert/);
+});
+
+test('SkillRegistry resolves confluence and wiki aliases', () => {
+  const reg = createDefaultRegistry();
+  for (const alias of ['confluence', 'wiki', 'doc', 'docs']) {
+    const res = reg.resolve(alias, { root: '/dummy' });
+    assert.equal(res.activeSkills[0].id, 'confluence');
+    assert.ok(res.tools.confluence_search);
+    assert.ok(res.tools.confluence_read);
+    assert.ok(res.tools.confluence_spaces);
+  }
+});
+
+test('renderSystemPrompt for confluence skill enforces read-only mode and drops write rules', () => {
+  const tools = confluenceSkill.getTools();
+  const prompt = renderSystemPrompt('/mock/root', tools, { skills: [confluenceSkill] });
+  assert.match(prompt, /<copilot:confluence_search/);
+  assert.match(prompt, /READ-ONLY MODE/);
+  assert.match(prompt, /All tools in this session are strictly read-only/);
+  assert.doesNotMatch(prompt, /write replaces the whole file/);
+  assert.doesNotMatch(prompt, /WHEN NOT TO CHANGE ANYTHING/);
 });
