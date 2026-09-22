@@ -268,6 +268,23 @@ export function parseToolTags(text, tools = defaultTools) {
   const src = stripFences(text);
   const calls = [];
   calls.unknown = [];
+  // Anything tag-shaped at all, however malformed: our namespace, some
+  // other namespace, or one of our tool names in angle brackets with no
+  // namespace at all. This is the evidence that the model tried to call
+  // something, which is what separates "it finished" from "we could not
+  // read it" — and the detector is deliberately wider than the grammar, so
+  // a shape nobody has thought of still counts as an attempt.
+  const toolNames = Object.keys(tools || {}).filter((n) => /^[a-z][a-z0-9_]*$/i.test(n));
+  // Autolinked URIs and unrelated XML are not attempts to call a tool, and
+  // crying wolf on a finished answer is its own kind of wrong.
+  const NOT_A_CALL = /^<\s*(mailto|https?|ftps?|tel|data|file|urn|xsl|xsd|xmlns|svg|soap|xsi)\s*:/i;
+  const tagLikePattern = new RegExp(
+    `<\\s*(?:[A-Za-z][\\w.-]*\\s*:\\s*[A-Za-z][\\w.-]*`
+    + (toolNames.length ? `|(?:${toolNames.join('|')})\\b` : '')
+    + ')',
+    'gi',
+  );
+  calls.tagLike = (src.match(tagLikePattern) || []).filter((m) => !NOT_A_CALL.test(m)).length;
   OPEN.lastIndex = 0;
   let m;
   while ((m = OPEN.exec(src))) {
@@ -307,6 +324,28 @@ export function parseToolTags(text, tools = defaultTools) {
  * because a review discusses the syntax rather than emitting it. Only a tag
  * at the start of a line ends the prose.
  */
+/**
+ * Everything observed in one reply, whether or not it could be acted on.
+ *
+ * The loop used to end on "no calls found" and report success. Every silent
+ * failure so far took that exit: a tag name with an underscore, an example
+ * written with square brackets, an invented tool name. Each looked exactly
+ * like a model that had finished. Counting what was seen makes the
+ * difference visible without having to predict the next cause.
+ */
+export function accountFor(reply, tools = defaultTools) {
+  const calls = parseToolTags(reply, tools);
+  return {
+    tagLike: calls.tagLike,
+    parsed: calls.length,
+    unknownNames: calls.unknown.slice(),
+    unterminated: calls.filter((c) => c.unterminated).length,
+    looseMentions: countMentions(reply),
+    proseChars: proseOf(reply, tools).length,
+    replyChars: String(reply || '').length,
+  };
+}
+
 export function proseOf(text) {
   const src = stripFences(text);
   OPEN.lastIndex = 0;
@@ -388,6 +427,11 @@ export async function runAgent({
     if (prose) ui.prose(prose);
 
     const calls = parseToolTags(reply, tools);
+    if (calls.unknown && calls.unknown.length && calls.length && ui.unknownTag) {
+      // Some calls worked and some named nothing: still worth saying, or a
+      // half-done step looks complete.
+      ui.unknownTag(calls.unknown, Object.keys(tools).join(', '));
+    }
     // A tag that named nothing real is a near miss, not an ending. Telling
     // the model which names exist costs one step and usually recovers,
     // where stopping costs the whole run.
@@ -409,7 +453,24 @@ export async function runAgent({
     // misplaced call — but it must never be quiet.
     const loose = countMentions(reply);
     if (loose && ui.ignored) ui.ignored(loose);
-    if (!calls.length) return { done: true, steps: step };
+    if (!calls.length) {
+      const seen = accountFor(reply, tools);
+      // Nothing tag-shaped at all: the model genuinely answered in prose.
+      if (!seen.tagLike) return { done: true, steps: step, accounting: seen };
+      // Otherwise it tried to call something and we could not use it. That
+      // is not success, and saying so is the whole point: the next cause of
+      // this — whatever it turns out to be — announces itself on the first
+      // run instead of looking like a finished task.
+      if (ui.unreadable) ui.unreadable(seen, reply);
+      return {
+        done: false,
+        steps: step,
+        accounting: seen,
+        stalled: `the reply contained ${seen.tagLike} tag-shaped item(s) that produced no usable call `
+          + `(${seen.unknownNames.length} unknown name(s), ${seen.unterminated} unterminated, `
+          + `${seen.looseMentions} not at the start of a line)`,
+      };
+    }
 
     const results = [];
     for (const call of calls) {

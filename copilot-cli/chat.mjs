@@ -272,6 +272,19 @@ function agentUI() {
     toolError: (label, msg) => note(`[agent] ${label} — FAILED: ${msg}`),
     skipped: (label) => note(`[agent] ${label} — skipped`),
     ignored: (n) => note(`[agent] ignored ${n} tag-like mention${n === 1 ? '' : 's'} that were not at the start of a line`),
+    unreadable: (seen, reply) => {
+      // The run is over and nothing ran. Everything observed goes to the
+      // terminal and to disk, so the cause is in hand without a second run.
+      note('[agent] the reply contained something tag-shaped that produced no usable call.');
+      note(`[agent]   tag-like: ${seen.tagLike}  parsed: ${seen.parsed}  unknown names: ${seen.unknownNames.join(', ') || 'none'}`);
+      note(`[agent]   unterminated: ${seen.unterminated}  not at line start: ${seen.looseMentions}`);
+      try {
+        fs.writeFileSync('copilot-cli-agent-unreadable.txt',
+          `version ${VERSION}\nwhen ${new Date().toISOString()}\n` +
+          JSON.stringify(seen, null, 1) + '\n\n--- the reply, verbatim ---\n' + reply + '\n');
+        note('[agent]   the whole reply is in copilot-cli-agent-unreadable.txt');
+      } catch { /* never fail a turn over diagnostics */ }
+    },
     unknownTag: (names, known) => {
       note(`[agent] the model asked for a tool that does not exist: ${names.join(', ')}`);
       note(`[agent] telling it the real names (${known}) and letting it retry.`);
