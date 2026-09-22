@@ -74,9 +74,16 @@ export async function askInPage(cfg) {
     return null;
   };
 
+  // Wait for the page to be idle, and if it will not become idle, do not
+  // send. Falling through after a timeout and sending anyway is the single
+  // worst thing this tool can do: it is a message delivered into a backend
+  // that is visibly still working, which is the definition of piling on.
+  // A turn that never happens costs nothing; one sent into a busy service
+  // may cost the account.
+  const preflightLimit = Number(cfg.preflightMs || 60000);
   const preflightStart = Date.now();
   let preflightLogged = false;
-  while (stopNow() && (Date.now() - preflightStart < 30000)) {
+  while (stopNow() && (Date.now() - preflightStart < preflightLimit)) {
     // Logged once rather than sixty times, and the total is recorded below:
     // a stop control that is stuck visible costs this wait on every single
     // turn, and that needs to be visible in the diagnostics rather than felt
@@ -85,11 +92,22 @@ export async function askInPage(cfg) {
     await sleep(500);
   }
   const preflightMs = Date.now() - preflightStart;
-  const preflightTimedOut = preflightMs >= 30000;
-  if (preflightMs > 200) {
-    log(`waited ${preflightMs}ms before sending${preflightTimedOut
-      ? ' and gave up: the stop control never went away, so it may be stale rather than streaming'
-      : ''}`);
+  const preflightTimedOut = preflightMs >= preflightLimit;
+  if (preflightMs > 200) log(`waited ${preflightMs}ms for the page to go idle`);
+
+  if (preflightTimedOut && stopNow()) {
+    // Still working after the full wait. Refuse, and say so: the caller can
+    // stop, and nothing was added to the conversation.
+    log(`the page was still generating after ${preflightMs}ms; refusing to send`);
+    debug.wait = { via: 'not-sent-page-busy', sawStop: true, ms: preflightMs, submissions: 0, preflightMs, preflightTimedOut: true };
+    return {
+      ok: true,
+      busy: true,
+      notSent: true,
+      text: '',
+      method: 'not sent: the page was still generating a previous response',
+      debug,
+    };
   }
   const inputReadyStart = Date.now();
   while ((input.disabled || input.getAttribute('aria-disabled') === 'true') && (Date.now() - inputReadyStart < 10000)) {
@@ -437,6 +455,13 @@ export async function askInPage(cfg) {
     }, TICK);
   });
   clearInterval(watchStop);
+  // Did this turn end knowing the page had stopped, or did it give up? On
+  // timeout, or on the stale net, the page may well still be generating,
+  // and sending the next turn into that is exactly what must not happen.
+  wait.pageIdleAtEnd = wait.via === 'stop-control-gone' || (wait.via === 'quiet' && !stopNow());
+  // With no stop control ever seen, there is no busy signal on this page at
+  // all, so the wait before sending is blind. Worth knowing, once.
+  wait.noBusySignal = !wait.sawStop;
   debug.wait = wait;
   log(`waited ${wait.ms}ms, ended via ${wait.via}${wait.sawStop ? '' : ' (no stop control was ever visible)'}`);
   obs.disconnect();

@@ -435,7 +435,12 @@ export async function runAgent({
     lastTurnAt = Date.now();
 
     const reply = await ask(prompt);
-    if (reply === null || reply === undefined) return { done: false, steps: step, stalled: 'no answer came back' };
+    if (reply === null || reply === undefined) {
+      // Either the page was busy and nothing was sent, or the answer could
+      // not be read. Both mean stop: another turn would be a message into a
+      // service whose state we do not know.
+      return { done: false, steps: step, stalled: 'no answer came back, so the run stops rather than sending again' };
+    }
 
     // The service pushing back is not a retryable condition. Asking again
     // is what caused it, and asking again is what would keep it.

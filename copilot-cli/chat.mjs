@@ -197,7 +197,23 @@ async function askPage(cdp, full) {
   lastDebug = res.debug;
   // Sending more than once is the failure that costs the most on a
   // corporate backend, so it is said out loud rather than left in a file.
+  // Nothing was sent because the page was working. Do not retry: waiting is
+  // the whole point, and the caller stops.
+  if (res && res.notSent) {
+    note('[bridge] the page was still generating a previous response, so nothing was sent.');
+    note('[bridge] let it finish in Chrome, then run this again.');
+    return null;
+  }
+
   const w = res.debug && res.debug.wait;
+  if (w && w.noBusySignal) {
+    note('[bridge] no stop control was seen this turn, so the check for "is the page busy"');
+    note('[bridge] had nothing to look at. Pin it with STOP_SELECTOR if turns start overlapping.');
+  }
+  if (w && w.pageIdleAtEnd === false) {
+    note(`[bridge] this turn ended via ${w.via}, so the page may still be working.`);
+    note('[bridge] treating the page state as unknown rather than sending again.');
+  }
   if (w && w.submissions > 1) {
     note(`[bridge] the send needed ${w.submissions} attempts (${w.via}); only the one that registered was accepted.`);
   }
