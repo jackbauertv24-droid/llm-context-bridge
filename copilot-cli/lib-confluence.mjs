@@ -603,7 +603,8 @@ export function confluenceTools(client = new ConfluenceClient()) {
   return {
     confluence_search: {
       summary: 'Search corporate Confluence articles and knowledge base',
-      usage: '<copilot:confluence_search query="keyword" [space="KEY"] [limit="5"]/>',
+      usage: '<copilot:confluence_search query="keyword" space="KEY" limit="5"/>\n'
+        + '# space and limit may be left out.',
       body: false,
       mutates: false,
       describe: (args) => `search Confluence for "${args.query || ''}"${args.space ? ` in space ${args.space}` : ''}`,
@@ -629,7 +630,8 @@ export function confluenceTools(client = new ConfluenceClient()) {
 
     confluence_read: {
       summary: 'Read a Confluence page by ID or title',
-      usage: '<copilot:confluence_read id="123456" [title="Page Title"]/>',
+      usage: '<copilot:confluence_read id="123456"/>\n'
+        + '# or, instead of id: <copilot:confluence_read title="Page Title"/>',
       body: false,
       mutates: false,
       describe: (args) => `read Confluence page ${args.id || args.title || '(unspecified)'}`,
@@ -651,7 +653,8 @@ export function confluenceTools(client = new ConfluenceClient()) {
 
     confluence_spaces: {
       summary: 'List available Confluence spaces to filter searches',
-      usage: '<copilot:confluence_spaces [limit="20"]/>',
+      usage: '<copilot:confluence_spaces limit="20"/>\n'
+        + '# limit may be left out.',
       body: false,
       mutates: false,
       describe: () => 'list Confluence spaces',

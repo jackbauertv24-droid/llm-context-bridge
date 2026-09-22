@@ -87,8 +87,41 @@ export function assertToolNames(tools) {
   return true;
 }
 
+/**
+ * Every tool's own usage example must parse back into a call for that tool.
+ *
+ * This is the check that was missing. A tool whose example the parser cannot
+ * read is a tool the model is actively taught to call wrongly, and the
+ * failure is silent: the reply looks like prose and the turn ends. It has
+ * happened twice — a tag name with an underscore that the grammar rejected,
+ * and optional attributes written as [limit="5"], which is prose notation
+ * the model copies literally. Both passed every test, because the tests
+ * checked that the prompt mentioned the tags, not that a tag could be read
+ * back.
+ *
+ * Lines beginning with # are treated as commentary rather than examples, so
+ * a tool can explain itself without every line having to be a valid tag.
+ */
+export function assertToolUsage(tools) {
+  const problems = [];
+  for (const [name, def] of Object.entries(tools || {})) {
+    const usage = String((def && def.usage) || '');
+    const examples = usage.split('\n').filter((l) => l.trim() && !l.trim().startsWith('#')).join('\n');
+    if (!examples.trim()) { problems.push(`${name}: has no usage example`); continue; }
+    const calls = parseToolTags(examples, tools);
+    const hit = calls.find((c) => c.name === name);
+    if (!hit) problems.push(`${name}: its own example does not parse (${JSON.stringify(examples.slice(0, 80))})`);
+    else if (hit.unterminated) problems.push(`${name}: its example opens a body and never closes it`);
+  }
+  if (problems.length) {
+    throw new Error(`these tools would be described to the model in a form it cannot emit:\n  ${problems.join('\n  ')}`);
+  }
+  return true;
+}
+
 export function renderSystemPrompt(root, tools = defaultTools, { skills = null } = {}) {
   assertToolNames(tools);
+  assertToolUsage(tools);
   const activeSkills = skills && skills.length ? skills : null;
   const anyMutates = activeSkills
     ? activeSkills.some((s) => s.mutates)
