@@ -396,10 +396,19 @@ export function createAgentSession(root) {
  * text, or null if the turn produced nothing — which is a page problem, not a
  * model one, and ends the run rather than looping on an empty reply.
  */
+/**
+ * Phrases that mean "not now": the page is still working, or the service is
+ * pushing back. Either way the answer is to wait longer and eventually to
+ * stop, never to ask again immediately.
+ */
+const BUSY = /please wait (for|until) the (current|previous) response|still (working|responding|generating)/i;
+const THROTTLED = /too many requests|rate[- ]limit|slow down|you(?:'| ha)ve reached|temporarily unavailable|try again (in|later)|quota|throttl/i;
+
 export async function runAgent({
   ask, task, session, maxSteps = 16, approve = async () => true, ui,
   tools = defaultTools,
   skills = null,
+  minTurnGapMs = 2000, maxBusyRetries = 3,
 }) {
   const ctx = { root: session.root };
 
@@ -410,15 +419,54 @@ export async function runAgent({
     : `${renderSystemPrompt(session.root, tools, { skills })}\n\nTASK: ${task}`;
   session.primed = true;
 
+  let busyRetries = 0;
+  let lastTurnAt = 0;
+
   for (let step = 1; step <= maxSteps; step++) {
     ui.step(step, maxSteps);
+
+    // A minimum gap between turns. The loop used to fire them back to back
+    // as fast as the page would answer, which is indistinguishable from an
+    // attack from the far end.
+    const since = Date.now() - lastTurnAt;
+    if (lastTurnAt && since < minTurnGapMs) {
+      await new Promise((r) => setTimeout(r, minTurnGapMs - since));
+    }
+    lastTurnAt = Date.now();
 
     const reply = await ask(prompt);
     if (reply === null || reply === undefined) return { done: false, steps: step, stalled: 'no answer came back' };
 
-    if (/please wait (for|until) the (current|previous) response/i.test(reply)) {
-      if (ui.toolError) ui.toolError('copilot', 'page was still busy with a previous response; retrying...');
-      await new Promise((r) => setTimeout(r, 4000));
+    // The service pushing back is not a retryable condition. Asking again
+    // is what caused it, and asking again is what would keep it.
+    if (THROTTLED.test(reply)) {
+      if (ui.throttled) ui.throttled(reply.slice(0, 300));
+      return {
+        done: false,
+        steps: step,
+        throttled: true,
+        stalled: 'the chat service asked us to slow down or refused the request; stopping rather than retrying',
+      };
+    }
+
+    // Busy is retryable, but a bounded number of times and with the waits
+    // getting longer. This used to decrement the step counter and continue,
+    // which meant the loop never advanced and the same prompt was re-sent
+    // every four seconds for as long as the page stayed busy — a spam loop
+    // with no exit, and the worst possible behaviour against a backend that
+    // is already struggling.
+    if (BUSY.test(reply)) {
+      busyRetries++;
+      if (busyRetries > maxBusyRetries) {
+        return {
+          done: false,
+          steps: step,
+          stalled: `the page reported it was busy ${busyRetries} times; stopping rather than asking again`,
+        };
+      }
+      const backoff = 5000 * (2 ** (busyRetries - 1));
+      if (ui.busy) ui.busy(busyRetries, maxBusyRetries, backoff);
+      await new Promise((r) => setTimeout(r, backoff));
       step--;
       continue;
     }

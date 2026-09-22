@@ -151,7 +151,42 @@ function readStdin() {
  * result tags through this, and an "@" inside a file is not an attachment.
  * Returns null when the turn produced no usable answer.
  */
-async function askPage(cdp, full, retries = 2) {
+// ------------------------------------------------------- circuit breaker
+//
+// Every message this tool puts into the chat goes through askPage, so this
+// is the one place that can bound it absolutely. It exists because a bug in
+// the send path put the same prompt into a corporate backend repeatedly,
+// and no amount of care in the layers above is worth as much as a limit
+// that does not depend on that care being correct. A future fault that
+// tries to send in a loop stops here rather than at the far end's patience.
+const SEND_LIMITS = {
+  maxPerRun: Number(process.env.MAX_SENDS_PER_RUN || 40),
+  minIntervalMs: Number(process.env.MIN_SEND_INTERVAL_MS || 1500),
+};
+let sendsThisRun = 0;
+let lastSendAt = 0;
+
+async function reserveSend() {
+  if (sendsThisRun >= SEND_LIMITS.maxPerRun) return null;
+  const since = Date.now() - lastSendAt;
+  if (lastSendAt && since < SEND_LIMITS.minIntervalMs) {
+    await new Promise((r) => setTimeout(r, SEND_LIMITS.minIntervalMs - since));
+  }
+  sendsThisRun++;
+  lastSendAt = Date.now();
+  return sendsThisRun;
+}
+
+async function askPage(cdp, full) {
+  const nth = await reserveSend();
+  if (nth === null) {
+    note(`[bridge] refusing to send: ${sendsThisRun} messages already sent this run, which is the limit`);
+    note('[bridge] (MAX_SENDS_PER_RUN). Something is looping; nothing further will be sent.');
+    return null;
+  }
+  if (nth === Math.floor(SEND_LIMITS.maxPerRun * 0.75)) {
+    note(`[bridge] ${nth} of ${SEND_LIMITS.maxPerRun} allowed messages used in this run.`);
+  }
   let res;
   try {
     res = await cdp.evalFn(askInPage, { ...CONFIG, prompt: full }, { timeoutMs: CONFIG.answerTimeoutMs + 8000 });
@@ -178,16 +213,14 @@ async function askPage(cdp, full, retries = 2) {
     if (capture) fs.writeFileSync('copilot-cli-capture.json', JSON.stringify(capture, null, 1) + '\n');
   } catch { /* diagnostics are a nicety, never a reason to fail a turn */ }
 
+  // Busy is reported, never retried here. The agent loop owns that decision
+  // and backs off with a bounded number of attempts; this layer retrying as
+  // well meant the two multiplied — three sends here inside four there.
   const isBusy = (res && res.busy) || /please wait (for|until) the (current|previous) response/i.test(res?.text || '');
   if (isBusy) {
-    if (retries > 0) {
-      note('[bridge] Copilot was busy with a previous response; waiting 4s before automatic retry...');
-      await new Promise((r) => setTimeout(r, 4000));
-      return askPage(cdp, full, retries - 1);
-    }
-    note('[bridge] Copilot is still busy: "Please wait for the current response to finish."');
-    note('[bridge] Wait for the current response in Chrome to finish, or click "+ New chat" in the tab.');
-    return null;
+    note('[bridge] Copilot says it is busy with a previous response.');
+    note('[bridge] Wait for it to finish in Chrome, or click "+ New chat" in the tab.');
+    return res && res.text ? res.text : null;
   }
 
   // Say so when the pick looks doubtful, rather than printing it as if sound.
@@ -277,6 +310,12 @@ function agentUI() {
     },
     toolError: (label, msg) => note(`[agent] ${label} — FAILED: ${msg}`),
     skipped: (label) => note(`[agent] ${label} — skipped`),
+    busy: (n, max, ms) => note(`[agent] the page says it is still busy (${n}/${max}); waiting ${Math.round(ms / 1000)}s before asking again`),
+    throttled: (text) => {
+      note('[agent] the chat service is pushing back — stopping rather than retrying.');
+      note(`[agent]   it said: ${text.replace(/\s+/g, ' ').slice(0, 160)}`);
+      note('[agent]   leave it a few minutes, and consider starting a fresh Copilot conversation.');
+    },
     ignored: (n) => note(`[agent] ignored ${n} tag-like mention${n === 1 ? '' : 's'} that were not at the start of a line`),
     unreadable: (seen, reply) => {
       // The run is over and nothing ran. Everything observed goes to the
@@ -373,6 +412,8 @@ async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv, 
     session: sess,
     approve: approver({ yes, question }),
     ui: agentUI(),
+    minTurnGapMs: Number(process.env.AGENT_TURN_GAP_MS || 2000),
+    maxBusyRetries: Number(process.env.AGENT_BUSY_RETRIES || 3),
     tools: resolved.tools,
     skills: resolved.activeSkills,
   });
