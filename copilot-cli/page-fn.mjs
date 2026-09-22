@@ -312,8 +312,31 @@ export async function askInPage(cfg) {
    * on the composer alone was the mistake — a slow editor still holding the
    * text reads as "not sent" and invites another attempt.
    */
-  const sendRegistered = () => !hasText() || wait.sawStop || !!stopNow()
-    || answerBlocks().some((el) => !baseSet.has(el));
+  /**
+   * The strongest evidence that the message was accepted: it is now in the
+   * conversation. The page echoes what you sent as a turn of its own, so
+   * finding our text somewhere other than the composer proves delivery
+   * outright, where an empty composer only suggests it.
+   *
+   * This matters most when the far end is slow. "The composer still has
+   * text" was the first thing checked, and a backend taking its time is
+   * exactly when that stays true for a message that did in fact arrive —
+   * so latency alone would provoke a second copy of it.
+   */
+  const promptTail = norm(cfg.prompt).slice(-60);
+  const countIn = (el) => {
+    if (!el || !promptTail) return 0;
+    try { return norm(el.innerText || '').split(promptTail).length - 1; } catch { return 0; }
+  };
+  const promptEchoed = () => {
+    if (!promptTail) return false;
+    return countIn(document.body) > countIn(composer);
+  };
+
+  const sendRegistered = () => promptEchoed()
+    || wait.sawStop || !!stopNow()
+    || answerBlocks().some((el) => !baseSet.has(el))
+    || !hasText();
 
   const waitForRegistration = async (ms) => {
     const until = Date.now() + ms;
@@ -324,15 +347,19 @@ export async function askInPage(cfg) {
     return sendRegistered();
   };
 
-  // Attempt one was the Enter above. Give it time before concluding anything.
-  let sent = await waitForRegistration(2500);
+  // How long to allow before concluding a send did not land. Two and a half
+  // seconds was a guess made against a responsive page; a throttled or busy
+  // backend can take far longer to acknowledge, and concluding too early is
+  // precisely how a slow accept becomes a duplicate message.
+  const verifyMs = Number(cfg.sendVerifyMs || 10000);
+  let sent = await waitForRegistration(verifyMs);
 
   // Attempt two: Ctrl+Enter, which some rich editors want when the text
   // spans several lines.
   if (!sent && cfg.prompt.includes('\n')) {
-    log('Enter did not register after 2500ms; trying Ctrl+Enter once');
+    log(`Enter did not register after ${verifyMs}ms; trying Ctrl+Enter once`);
     fireEnter(input, true);
-    sent = await waitForRegistration(2500);
+    sent = await waitForRegistration(verifyMs);
   }
 
   // Attempt three, and the last: a single activation of the send control.
@@ -341,7 +368,7 @@ export async function askInPage(cfg) {
     if (btn && isEnabled(btn)) {
       log(`still not registered; clicking send once, aria="${btn.getAttribute('aria-label') || ''}"`);
       activate(btn);
-      sent = await waitForRegistration(2500);
+      sent = await waitForRegistration(verifyMs);
     } else {
       log('no enabled send control was found to try');
     }
@@ -378,7 +405,14 @@ export async function askInPage(cfg) {
       // page stopped changing is stale, not generating. Without this the turn
       // would sit until the answer timeout -- two minutes for a page that
       // finished seconds ago.
-      const stale = wait.sawStop && Date.now() - lastMutation > cfg.quietMs * 3;
+      // The stale net exists so a stop control stuck visible cannot hold a
+      // turn open for the full answer timeout. It must not fire while the
+      // page is merely thinking: three times the quiet period is under five
+      // seconds by default, and a slow backend pausing that long mid-answer
+      // was cut off and its half-written reply taken as final. Thirty
+      // seconds of complete silence is stuck; five is slow.
+      const staleAfter = Math.max(cfg.quietMs * 3, 30000);
+      const stale = wait.sawStop && Date.now() - lastMutation > staleAfter;
 
       if (grew && (finished || quiet || stale)) {
         wait.via = finished ? 'stop-control-gone' : stale ? 'stale-stop-control' : 'quiet';
@@ -482,8 +516,21 @@ export async function askInPage(cfg) {
   const ranked = [...results].sort((a, b) => b.score - a.score);
   const winner = ranked.find((r) => r.text);
 
-  text = winner ? winner.text : '';
-  method = winner ? `${winner.name} (score ${winner.score}, ${winner.path || 'page text'})` : 'nothing extracted';
+  // An echo of what we just sent is not an answer. It was returned as one
+  // when the page was slow enough that nothing else had appeared, and for
+  // the agent that is actively dangerous: our prompts contain example
+  // tags, so handing the prompt back as a reply would have the bridge
+  // execute its own instructions.
+  if (winner && winner.containsPrompt) {
+    log('best candidate was an echo of our own prompt, not an answer; returning nothing');
+    debug.echoOnly = true;
+    text = '';
+  } else {
+    text = winner ? winner.text : '';
+  }
+  method = debug.echoOnly
+    ? `refused: only our own prompt was on the page (${winner.name})`
+    : winner ? `${winner.name} (score ${winner.score}, ${winner.path || 'page text'})` : 'nothing extracted';
   debug.candidates = ranked.map(({ el, text: _t, ...rest }) => rest);
 
   if (afterBlocks.length === baseCount && !freshBlocks.length) {
