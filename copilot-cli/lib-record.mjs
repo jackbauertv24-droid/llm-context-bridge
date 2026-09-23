@@ -460,6 +460,7 @@ export async function recordConversation(cfg) {
    * outside the composer, widened only while the widening adds almost
    * nothing — so it cannot swallow neighbouring messages.
    */
+  const insideAnswer = (el) => answers().some((a) => a === el || safe(() => a.contains(el), false));
   const findEcho = (nonce, typedLength) => {
     // Walked by hand rather than selected with 'body *'. The selector is
     // fine in a browser, but it left this search unexercised by the checks
@@ -473,6 +474,8 @@ export async function recordConversation(cfg) {
     let best = null;
     for (const el of all) {
       if (composer && composer.contains(el)) continue;
+      // A reply may repeat the marker back; that is not the echo.
+      if (insideAnswer(el)) continue;
       const t = safe(() => el.innerText || '', '');
       if (!t.includes(nonce)) continue;
       if (!best || (best.contains(el) && el !== best)) best = el;
@@ -494,13 +497,50 @@ export async function recordConversation(cfg) {
     return best;
   };
 
+  // ------------------------------------------------------------ clearing
+  // A fresh chat's box is already empty, so a recording that only sends
+  // would never show whether clearing works — and the bridge clears before
+  // every message. Type our own words, clear, and measure each method.
+  if (cfg.clearTest !== false) {
+    const idle = await waitIdle(Number(cfg.idleMaxMs || 90000));
+    const test = { idle: idle.idle };
+    if (idle.idle && visibleLength(composerHolds()) === 0) {
+      const words = `clear-test ${cfg.clearNonce || 'probe'}`;
+      input.focus();
+      try { document.execCommand('insertText', false, words); } catch (e) { test.insertError = String(e && e.message); }
+      await sleep(200);
+      test.afterInsert = visibleLength(composerHolds());
+      try {
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        const range = document.createRange();
+        range.selectNodeContents(input);
+        sel.addRange(range);
+        document.execCommand('delete', false);
+      } catch (e) { test.deleteError = String(e && e.message); }
+      await sleep(200);
+      test.afterExecCommandDelete = visibleLength(composerHolds());
+      if (test.afterExecCommandDelete > 0) {
+        try { input.textContent = ''; } catch { /* recorded below */ }
+        await sleep(200);
+        test.afterTextContentFallback = visibleLength(composerHolds());
+      }
+      test.clearedBy = test.afterExecCommandDelete === 0 ? 'execCommand delete'
+        : test.afterTextContentFallback === 0 ? 'textContent fallback' : 'neither';
+    } else {
+      test.skipped = idle.idle ? 'the box was not empty to begin with, so it was left alone' : 'the page was not idle';
+    }
+    out.clearTest = test;
+    publish();
+  }
+
   // ---------------------------------------------------------------- turns
   const perTurnMs = Number(cfg.perTurnMs || 90000);
   const idleMaxMs = Number(cfg.idleMaxMs || 90000);
 
   for (let n = 0; n < (cfg.turns || []).length; n++) {
-    const { prompt, nonce } = cfg.turns[n];
-    const turn = { index: n + 1, nonce, typed: prompt, typedLength: prompt.length, timeline: [] };
+    const { prompt, nonce, label, method = 'enter', tolerant = false } = cfg.turns[n];
+    const turn = { index: n + 1, label: label || null, method, tolerant, nonce, typed: prompt, typedLength: prompt.length, timeline: [] };
     out.turns.push(turn);
     const t0 = Date.now();
     const mark = (what, extra) => turn.timeline.push({ atMs: Date.now() - t0, what, ...(extra || {}) });
@@ -526,7 +566,9 @@ export async function recordConversation(cfg) {
       break;
     }
 
+    const insertStarted = Date.now();
     try { document.execCommand('insertText', false, prompt); } catch (e) { turn.insertError = String(e && e.message); }
+    turn.insertMs = Date.now() - insertStarted;
     await sleep(250);
     const held = composerHolds();
     turn.composerHeld = {
@@ -536,24 +578,73 @@ export async function recordConversation(cfg) {
       html: bound(safe(() => input.innerHTML, ''), 60000),
     };
     turn.composerButtonsTyped = composer ? safe(() => [...composer.querySelectorAll('button, [role="button"]')].map(describe), []) : [];
+    // A size limit, if the page states one: an attribute on the input, or a
+    // counter such as "15000/16000" in the composer. Only text that is
+    // nothing but digits and a slash is read, so nothing else is taken.
+    turn.composerLimit = {
+      maxlength: safe(() => input.getAttribute('maxlength')) || null,
+      counters: composer ? safe(() => {
+        const found = [];
+        const walk = (el) => {
+          for (const c of (el.children || [])) {
+            const t = norm(safe(() => c.innerText, '') || '');
+            if (!c.children.length && /^\d[\d,.\s]*\/\s*\d[\d,.\s]*$/.test(t)) found.push(t);
+            walk(c);
+          }
+        };
+        walk(composer);
+        return found;
+      }, []) : [],
+    };
     mark('typed', { held: held.length });
 
     const baseline = new Set(answers());
     const baseChars = bodyChars();
     const stopsBefore = visibleStops().length;
+    // Alerts and live regions present before the send, so any that appear
+    // after it — "message too long", a rate limit — can be told apart.
+    const noticeSel = '[role="alert"], [role="status"], [aria-live="assertive"], [aria-live="polite"]';
+    const noticesBefore = new Set(safe(() => [...document.querySelectorAll(noticeSel)], []));
 
-    // One submission. keypress only if the page did not take the keydown,
-    // as a browser would; no button, no retry.
-    const key = (type) => new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
-    const taken = safe(() => !input.dispatchEvent(key('keydown')), null);
-    if (taken === false) safe(() => input.dispatchEvent(key('keypress')));
-    safe(() => input.dispatchEvent(key('keyup')));
-    turn.enterConsumed = taken;
-    mark('enter');
+    // One submission, by the method this turn is testing. Never a second.
+    const key = (type, ctrl) => new KeyboardEvent(type, {
+      key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
+      ctrlKey: !!ctrl, metaKey: !!ctrl,
+    });
+    if (method === 'button') {
+      // Only a control that says it sends. Clicking an unlabelled button
+      // could attach a file or open a menu.
+      const candidates = composer ? safe(() => [...composer.querySelectorAll('button, [role="button"]')]
+        .filter((b) => vis(b) && !b.disabled && safe(() => b.getAttribute('aria-disabled'), null) !== 'true'), []) : [];
+      const send = candidates.find((b) => /\b(send|submit)\b/i.test(labelOf(b)));
+      turn.sendButton = describe(send || null);
+      turn.sendCandidates = candidates.map(describe);
+      if (!send) {
+        turn.buttonNotFound = true;
+        mark('no labelled send button; not clicking anything');
+      } else {
+        safe(() => send.click());
+        mark('send button clicked');
+      }
+    } else {
+      const ctrl = method === 'ctrl-enter';
+      const taken = safe(() => !input.dispatchEvent(key('keydown', ctrl)), null);
+      if (taken === false) safe(() => input.dispatchEvent(key('keypress', ctrl)));
+      safe(() => input.dispatchEvent(key('keyup', ctrl)));
+      turn.enterConsumed = taken;
+      mark(ctrl ? 'ctrl+enter' : 'enter');
+    }
 
     let clearedAt = null; let stopAt = null; let stopGoneAt = null; let answerAt = null; let echoAt = null;
     let lastChars = baseChars; let lastGrowthAt = Date.now();
     let stopSeen = null;
+    let lastFreshCount = 0;
+    let firstAnswerNode = null;
+    let answerReplaced = false;
+    // gap 9: the longest silence while an answer is being written, which is
+    // what the quiet timer has to outlast.
+    let firstGrowthAt = null;
+    let maxGrowthGapMs = 0;
     while (Date.now() - t0 < perTurnMs) {
       await sleep(250);
       const now = Date.now() - t0;
@@ -567,13 +658,28 @@ export async function recordConversation(cfg) {
       if (stopAt !== null && stopGoneAt === null && stops.length <= stopsBefore) { stopGoneAt = now; mark('stop control gone'); }
       const fresh = answers().filter((a) => !baseline.has(a));
       if (answerAt === null && fresh.length) { answerAt = now; mark('answer node appeared'); }
+      if (fresh.length !== lastFreshCount) {
+        if (lastFreshCount > 0) mark('answer node count changed', { from: lastFreshCount, to: fresh.length });
+        lastFreshCount = fresh.length;
+      }
+      if (fresh.length && firstAnswerNode === null) firstAnswerNode = fresh[0];
+      if (firstAnswerNode && !safe(() => firstAnswerNode.isConnected, true) && !answerReplaced) {
+        answerReplaced = true;
+        mark('the first answer node was removed from the page');
+      }
       if (echoAt === null && findEcho(nonce, prompt.length)) { echoAt = now; mark('echo found'); }
       const c = bodyChars();
-      if (c - lastChars >= 20) { mark('text grew', { by: c - lastChars }); lastGrowthAt = Date.now(); }
+      if (c - lastChars >= 20) {
+        if (firstGrowthAt !== null) maxGrowthGapMs = Math.max(maxGrowthGapMs, Date.now() - lastGrowthAt);
+        else firstGrowthAt = Date.now();
+        mark('text grew', { by: c - lastChars });
+        lastGrowthAt = Date.now();
+      }
       lastChars = c;
 
       // Never registered: no clearing, no stop control, no echo, no answer.
-      if (now > Number(cfg.registerMs || 15000) && clearedAt === null && stopAt === null && echoAt === null && answerAt === null) {
+      if ((turn.buttonNotFound || now > Number(cfg.registerMs || 15000))
+        && clearedAt === null && stopAt === null && echoAt === null && answerAt === null) {
         turn.sendNotRegistered = true;
         mark('send did not register');
         break;
@@ -584,6 +690,17 @@ export async function recordConversation(cfg) {
         break;
       }
     }
+
+    // Page notices that appeared during this turn. These are the page's own
+    // interface text, bounded, and read only if they are new.
+    turn.notices = safe(() => [...document.querySelectorAll(noticeSel)]
+      .filter((el) => !noticesBefore.has(el) && !insideAnswer(el) && vis(el))
+      .map((el) => ({ describe: describe(el), text: bound(norm(safe(() => el.innerText, '') || ''), 300) }))
+      .filter((x) => x.text), []);
+
+    turn.answerReplacedMidStream = answerReplaced;
+    turn.maxGrowthGapMs = maxGrowthGapMs;
+    turn.stopLikeVisibleAfter = visibleStops().map(describe);
 
     Object.assign(turn, {
       composerClearedAt: clearedAt, stopAppearedAt: stopAt, stopGoneAt, answerAppearedAt: answerAt, echoFoundAt: echoAt,
@@ -622,7 +739,16 @@ export async function recordConversation(cfg) {
       turn.answer = null;
     }
     publish();
-    if (turn.sendNotRegistered) break;
+    if (turn.sendNotRegistered) {
+      if (!tolerant) break;
+      // A fallback that did not send tells us something, and nothing was
+      // sent, so the box is cleared of our own words and the next turn goes
+      // ahead.
+      clearComposer();
+      await sleep(500);
+      turn.clearedAfterNoSend = visibleLength(composerHolds()) === 0;
+      if (!turn.clearedAfterNoSend) { turn.stoppedHere = 'our own text could not be cleared, so nothing further was typed'; publish(); break; }
+    }
   }
 
   try { if (obs) obs.disconnect(); } catch { /* ignore */ }

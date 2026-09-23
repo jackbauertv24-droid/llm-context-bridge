@@ -35,6 +35,8 @@ throws — with no separate check.
 | A turn hung for two minutes on a stuck control | the stale net needed only 3× the quiet period | 30-second floor, and a control present before the send is distrusted | ok |
 | A slow accept was treated as a failed send, and duplicated | delivery was judged by the composer emptying | delivery is proved by the prompt appearing in the conversation | ok |
 | Our own prompt returned as the answer — which for the agent means executing the example tags in its own instructions | the echo scored best when nothing else had arrived | an echo is refused and reported | ok |
+| Found in the replica, not yet seen live: a turn finished at 1.1s with no answer | a new reply element counted as the answer arriving while it was still empty, so a page that built the element and dropped its stop control before any text came would return nothing | a new block counts only once it holds visible text; this only lengthens a wait | ok |
+| Found in a test: a turn that could wait for ever | `quietMs` and `answerTimeoutMs` had no defaults, so every finish condition compared against `undefined`; live config always sets both | both default inside the page function | ok |
 
 ## Not overwhelming the backend
 
@@ -73,6 +75,8 @@ throws — with no separate check.
 | The page recording carried the user's mail | it stored 80 characters of every element's text and 400 of the last answer | text is recorded only as a length; a check builds a page full of secrets and requires none survive | ok |
 | Ten commits shipped under a stale build number | the version lived in one file that changes rarely | one exported constant, imported everywhere, printed by every diagnostic | code |
 | A safety line claimed "all of them are reads" when nothing had been sent | the summary did not check whether any request happened | it says nothing was sent | code |
+| The recording never exercised the fallbacks, the clearing, or a long reply | it sent only by Enter into an already-empty box | `--record-chat` measures clearing on its own text, sends once each by button and Ctrl+Enter (allowed to fail, then cleared), records pauses mid-answer and a replaced reply node, and runs the bridge's own turn | ok |
+| The code-body check for backslashes never ran | it looked for a double backslash in a body that has single ones | fixed; a test requires the check to report | ok |
 
 ## The lesson that produced most of this file
 

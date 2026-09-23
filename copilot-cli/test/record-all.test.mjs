@@ -56,16 +56,16 @@ const CONFIG = {
 };
 
 test('the probe turns are the real agent prompt and a real tool result', () => {
-  const { turns } = buildProbeTurns({ registry: createDefaultRegistry(), root: process.cwd() });
-  assert.equal(turns.length, 2);
-  assert.ok(turns[0].prompt.includes('TOOLS') && turns[0].prompt.includes('<copilot:list'), 'the real agent instructions');
-  assert.ok(turns[0].prompt.length > 1500, 'at the real size');
-  assert.ok(turns[1].prompt.includes('<copilot:result tool="list"'), 'the real shape of a tool result');
-  for (const t of turns) assert.ok(t.prompt.includes(t.nonce), 'each carries its own marker');
-  assert.notEqual(turns[0].nonce, turns[1].nonce);
+  const { turns, long } = buildProbeTurns({ registry: createDefaultRegistry(), root: process.cwd() });
+  const agent = turns.find((t) => t.label === 'agent-prompt');
+  const result = turns.find((t) => t.label === 'tool-result');
+  assert.ok(agent.prompt.includes('TOOLS') && agent.prompt.includes('<copilot:list'), 'the real agent instructions');
+  assert.ok(agent.prompt.length > 1500, 'at the real size');
+  assert.ok(result.prompt.includes('<copilot:result tool="list"'), 'the real shape of a tool result');
+  for (const t of [...turns, long]) assert.ok(t.prompt.includes(t.nonce), 'each carries its own marker');
 });
 
-test('the whole command runs, sends two messages and writes the bundle', async () => {
+test('the whole command runs, sends each message once and writes the bundle', async () => {
   const restore = installGlobals();
   const notes = [];
   const files = {};
@@ -81,8 +81,10 @@ test('the whole command runs, sends two messages and writes the bundle', async (
       config: CONFIG,
       version: 'test',
     });
-    assert.equal(state.submits, 2, 'exactly two messages');
-    assert.equal(bundle.stages.conversation.turns.length, 2);
+    // This page sends on any Enter, Ctrl or not, and its Send button does
+    // nothing: seven by the keyboard, the bridge's turn, and the long one.
+    assert.equal(state.submits, 8, 'one per message that registers, never a repeat');
+    assert.equal(bundle.stages.conversation.turns.length, 7);
     assert.deepEqual(bundle.stages.analysis.turns[0].answer.bridgeParses, ['list'], 'the real parser reads the real-shaped reply');
     assert.equal(bundle.stages.confluence, undefined, 'mail and Confluence are not part of this recording');
     assert.equal(bundle.stages.mail, undefined);

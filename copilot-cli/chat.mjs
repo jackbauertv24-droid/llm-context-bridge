@@ -116,7 +116,7 @@ With an authenticated Confluence tab open in Chrome:
 
 With mail.env set up, the agent also gets a read-only view of your mail:
 
-  node chat.mjs --record-chat        record two chat turns once, for diagnosis
+  node chat.mjs --record-chat        record the chat page once (up to nine messages), for diagnosis
   node chat.mjs --record             record what the real page is and does
   node chat.mjs --record --as-agent  record it with the real agent prompt
   node chat.mjs --mail-check          check the setup, one run, changes nothing
@@ -700,18 +700,9 @@ async function runMailCheck(args) {
  * happening, and how does an answer arrive.
  */
 /**
- * One run that records everything, then checks Confluence and mail.
- *
- * Sends exactly two messages into the chat — the real agent prompt, and the
- * real shape of a tool result — and records both turns in full. Then runs
- * the Confluence check and the mail check, neither of which sends anything
- * to the chat. Each stage runs whatever happened to the one before, so a
- * failure in one still leaves the others' evidence behind.
- */
-/**
- * One run that records the chat page: two turns of plain request and
- * response. The work is in lib-record-run.mjs, where it can be exercised
- * before it is used.
+ * One run that records the chat page, and nothing but the chat page: up to
+ * nine plain requests and responses, listed in lib-record-run.mjs, where the
+ * whole run can be exercised before it is used.
  */
 async function runRecordAll(cdp) {
   const { runRecordAllWith } = await import('./lib-record-run.mjs');

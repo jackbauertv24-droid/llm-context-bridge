@@ -8,7 +8,7 @@
 
 import { parseToolTags } from './lib-agent.mjs';
 
-const ZW = /[​-‍⁠﻿]/g;
+const ZW = /[\u200B-\u200D\u2060\uFEFF]/g;
 const squash = (s) => String(s || '').replace(ZW, '').replace(/\s+/g, '');
 
 const markerCounts = (text) => {
@@ -102,12 +102,79 @@ function analyseAnswer(turn, tools) {
   };
 }
 
-export function analyseConversation(rec, tools) {
+const leading = (l) => (String(l).match(/^[ \t]*/) || [''])[0];
+
+/**
+ * Did a multi-line body survive the page? This is what write and edit live
+ * on: if the page drops indentation, eats a blank line, turns a tab into
+ * spaces, or leaves its line-number gutter inside the code, every file the
+ * agent writes comes out wrong.
+ */
+function analyseCodeBody(turn, tools, expected) {
+  const text = (turn.answer && turn.answer.text) || '';
+  const calls = parseToolTags(text, tools);
+  const w = calls.find((c) => c.name === 'write');
+  if (!w) {
+    return { parsed: false, reason: calls.length ? `got ${calls.map((c) => c.name).join(', ')} instead` : 'no write tag found in the reply' };
+  }
+  const got = w.body;
+  const exp = String(expected || '');
+  const expLines = exp.split('\n');
+  const gotLines = got.split('\n');
+  // Match lines by their content, so a missing or extra line does not throw
+  // every later comparison off.
+  const byContent = new Map(gotLines.map((l) => [l.trim(), l]));
+  const indentLost = expLines.filter((l) => l.trim() && byContent.has(l.trim()) && leading(byContent.get(l.trim())) !== leading(l));
+  return {
+    parsed: true,
+    exact: got === exp,
+    expectedLines: expLines.length,
+    gotLines: gotLines.length,
+    indentationPreserved: indentLost.length === 0,
+    indentationLostOn: indentLost.slice(0, 4),
+    tabPreserved: exp.includes('\t') ? got.includes('\t') : null,
+    blankLinePreserved: exp.split('\n').includes('') ? gotLines.includes('') : null,
+    nonAsciiPreserved: /[\u4e00-\u9fff]/.test(exp) ? /[\u4e00-\u9fff]/.test(got) && got.includes('\u2014') : null,
+    backslashesPreserved: exp.includes('\\') ? got.includes('\\') : null,
+    // A gutter that ends up inside the body shows as lines of bare digits.
+    digitOnlyLinesInBody: gotLines.filter((l) => /^\s*\d+\s*$/.test(l)).length,
+    differences: got === exp ? [] : firstDifferences(exp, got),
+  };
+}
+
+/** Whether the box takes a long message whole, and if not, where it stops. */
+function analyseLong(turn) {
+  const held = turn.composerHeld ? turn.composerHeld.text || '' : '';
+  const heldVisible = held.replace(ZW, '').length;
+  return {
+    typed: turn.typedLength,
+    held: heldVisible,
+    truncated: heldVisible < turn.typedLength * 0.98,
+    maxlength: turn.composerLimit ? turn.composerLimit.maxlength : null,
+    counters: turn.composerLimit ? turn.composerLimit.counters : [],
+    sendRegistered: !turn.sendNotRegistered,
+    notices: (turn.notices || []).map((n) => n.text),
+  };
+}
+
+export function analyseConversation(rec, tools, { expect = {} } = {}) {
   const turns = (rec.turns || []).map((t) => ({
     index: t.index,
+    label: t.label || null,
+    codeBody: t.label === 'code-body' && t.answer ? analyseCodeBody(t, tools, expect['code-body']) : undefined,
+    long: t.label === 'long' ? analyseLong(t) : undefined,
+    notices: (t.notices || []).map((n) => n.text),
+    method: t.method || 'enter',
     skipped: t.skipped || null,
     sendNotRegistered: !!t.sendNotRegistered,
     enterConsumed: t.enterConsumed,
+    sendButton: t.sendButton ? { ariaLabel: t.sendButton.ariaLabel, testid: t.sendButton.testid, path: t.sendButton.path } : null,
+    buttonNotFound: !!t.buttonNotFound,
+    clearedAfterNoSend: t.clearedAfterNoSend,
+    insertMs: t.insertMs,
+    maxGrowthGapMs: t.maxGrowthGapMs,
+    answerReplacedMidStream: t.answerReplacedMidStream,
+    stopLikeVisibleAfter: (t.stopLikeVisibleAfter || []).length,
     timing: {
       composerClearedAt: t.composerClearedAt, stopAppearedAt: t.stopAppearedAt,
       stopGoneAt: t.stopGoneAt, answerAppearedAt: t.answerAppearedAt, echoFoundAt: t.echoFoundAt,
@@ -123,6 +190,8 @@ export function analyseConversation(rec, tools) {
   const a2 = rec.turns && rec.turns[1] && rec.turns[1].answer;
   return {
     idle: rec.idle,
+    clearTest: rec.clearTest || null,
+    bridge: rec.bridge || null,
     before: rec.before ? { answerNodes: rec.before.answerNodes, stopLikeVisible: (rec.before.stopLikeVisible || []).length } : null,
     turns,
     secondTurnReadsNewAnswer: a1 && a2 ? a1.text !== a2.text : null,

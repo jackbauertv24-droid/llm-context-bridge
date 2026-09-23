@@ -115,6 +115,11 @@ export async function askInPage(cfg) {
   // that is visibly still working, which is the definition of piling on.
   // A turn that never happens costs nothing; one sent into a busy service
   // may cost the account.
+  // Defaults for the two timings every wait below depends on. Without them
+  // each finish condition compared against undefined, never came true, and
+  // a caller that left them out waited for ever.
+  const quietMs = Number(cfg.quietMs || 1500);
+  const answerTimeoutMs = Number(cfg.answerTimeoutMs || 120000);
   const preflightLimit = Number(cfg.preflightMs || 60000);
   // How long the page must be completely still before "a stop control is
   // visible" stops meaning "it is generating". A page that is genuinely
@@ -615,7 +620,12 @@ export async function askInPage(cfg) {
       // prompt was echoed, so a quiet second while Copilot was still thinking
       // counted as a finished answer. Require either a genuinely new answer
       // block, or growth beyond the prompt we just added.
-      const newBlock = answerBlocks().some((el) => !baseSet.has(el));
+      // A new block with nothing in it yet is not an answer. Counting it as
+      // one let a turn finish on an empty container whenever the page built
+      // the reply element and dropped its stop control before any text
+      // arrived, and the bridge returned nothing. This only ever lengthens
+      // the wait; it cannot stop a message being sent.
+      const newBlock = answerBlocks().some((el) => !baseSet.has(el) && visibleText(el.innerText).length > 0);
       const grew = newBlock || document.body.innerText.length > bodyBaseLen + cfg.prompt.length + 20;
 
       // Finished is "the text stopped growing", not "the DOM stopped
@@ -645,10 +655,10 @@ export async function askInPage(cfg) {
       // until 5.2 — so treating its disappearance as the finish truncated
       // the last second of every reply. It must also have stopped growing.
       const finished = trustStop && wait.sawStop && goneFor >= TICK * 2
-        && sinceGrowth > Math.min(cfg.quietMs, 1200);
+        && sinceGrowth > Math.min(quietMs, 1200);
       // The fallback, used whenever there is no trustworthy busy signal —
       // either none was ever seen, or the one on screen was already there.
-      const quiet = (strayStop || !wait.sawStop) && sinceGrowth > cfg.quietMs;
+      const quiet = (strayStop || !wait.sawStop) && sinceGrowth > quietMs;
       // And a safety net: a stop control that is still there long after the
       // page stopped changing is stale, not generating. Without this the turn
       // would sit until the answer timeout -- two minutes for a page that
@@ -659,7 +669,7 @@ export async function askInPage(cfg) {
       // seconds by default, and a slow backend pausing that long mid-answer
       // was cut off and its half-written reply taken as final. Thirty
       // seconds of complete silence is stuck; five is slow.
-      const staleAfter = Math.max(cfg.quietMs * 3, 30000);
+      const staleAfter = Math.max(quietMs * 3, 30000);
       const stale = trustStop && wait.sawStop && sinceGrowth > staleAfter;
 
       if (grew && (finished || quiet || stale)) {
@@ -678,7 +688,7 @@ export async function askInPage(cfg) {
         return;
       }
 
-      if (Date.now() - sentAt > cfg.answerTimeoutMs) {
+      if (Date.now() - sentAt > answerTimeoutMs) {
         wait.ms = Date.now() - sentAt;
         clearInterval(iv); resolve();
       }
