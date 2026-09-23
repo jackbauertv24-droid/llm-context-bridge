@@ -39,6 +39,12 @@ import { resolve, dirname, basename, relative, join, sep, parse } from 'node:pat
 const MAX_READ = 200_000;   // bytes; a file bigger than this is truncated
 const MAX_ENTRIES = 400;    // directory entries per listing
 const SKIP = new Set(['.git', 'node_modules', '.cache', 'dist', 'build']);
+const MAX_TREE = 1000;        // entries per tree
+const TREE_DEPTH = 8;         // default depth; the model may ask for up to 20
+const MAX_MATCHES = 200;      // search matches in total
+const MAX_PER_FILE = 20;      // search matches from any one file
+const MAX_SEARCH_BYTES = 1_000_000;   // larger files are not searched
+const MAX_LINE_SHOWN = 240;   // characters of a matching line shown
 
 // Roots where confinement would be meaningless. Handing the agent your home
 // directory is not a sandbox, it is the whole problem with a longer prefix.
@@ -249,13 +255,72 @@ export function applyEdits(text, blocks) {
   return { text: lines.join(eol), changed };
 }
 
+// Forward slashes whatever the platform, so the model sees one path style.
+const relOf = (rootReal, full) => relative(rootReal, full).split(sep).join('/') || '.';
+
+const intArg = (v, def, lo, hi, name) => {
+  if (v === undefined || v === '') return def;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < lo || n > hi) throw new ToolError(`${name} must be a whole number from ${lo} to ${hi}`);
+  return n;
+};
+
+// A directory to walk, confined like every other path.
+function dirArg(ctx, p) {
+  const shown = p || '.';
+  const rootReal = realpathSync(ctx.root);
+  const full = safePath(rootReal, shown);
+  if (!lexists(full)) throw new ToolError(`no such directory: ${shown}`);
+  if (!lstatSync(full).isDirectory()) throw new ToolError(`${shown} is a file; use read`);
+  return { rootReal, full, shown };
+}
+
+// Depth-first, sorted, never following a symlink, so the walk cannot leave
+// the directory it started in. visit() returns false to stop early.
+function walk(dir, depth, maxDepth, visit) {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }).sort(byName); } catch { return true; }
+  for (const e of entries) {
+    if (SKIP.has(e.name)) continue;
+    const full = join(dir, e.name);
+    if (visit(e, full, depth) === false) return false;
+    if (e.isDirectory() && depth < maxDepth && walk(full, depth + 1, maxDepth, visit) === false) return false;
+  }
+  return true;
+}
+
+// "*.mjs", "test*", "*.{js,mjs}" against a file's name.
+function globToRegExp(glob) {
+  const alts = [];
+  const body = String(glob).replace(/\{([^}]*)\}/g, (_, list) => {
+    alts.push(list.split(',').map((x) => x.replace(/[.+^$()|[\]\\]/g, '\\$&')).join('|'));
+    return `\u0000${alts.length - 1}\u0000`;
+  });
+  const re = body.replace(/[.+^$()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
+    .replace(/\u0000(\d+)\u0000/g, (_, i) => `(?:${alts[Number(i)]})`);
+  return new RegExp(`^${re}$`, 'i');
+}
+
+// "120-180", "120-", "120" (that one line), "-40" (the first forty).
+function parseRange(spec, total) {
+  const m = /^\s*(\d*)\s*(-)?\s*(\d*)\s*$/.exec(String(spec));
+  if (!m || (!m[1] && !m[3])) throw new ToolError(`lines must look like "120-180", "120-" or "120", not "${spec}"`);
+  const from = m[1] ? Number(m[1]) : 1;
+  const to = m[3] ? Number(m[3]) : (m[2] ? total : from);
+  if (from < 1 || to < from) throw new ToolError(`lines "${spec}" is not a valid range`);
+  return { from, to: Math.min(to, total) };
+}
+
 export const tools = {
   read: {
     summary: 'read a file',
-    describe: (a) => `read ${a.path}`,
-    usage: '<copilot:read path="src/index.js"/>',
+    describe: (a) => `read ${a.path}${a.lines ? ` lines ${a.lines}` : ''}`,
+    usage: '<copilot:read path="src/index.js"/>\n'
+      + '<copilot:read path="src/index.js" lines="120-180"/>\n'
+      + '# lines is optional: "120-180", "120-" to the end, or "120" for one line.',
     run(ctx, a) {
       const full = safePath(ctx.root, a.path);
+      if (a.lines !== undefined && a.lines !== '') return readRange(full, a.path, a.lines);
       const fd = openRegular(full, a.path);
       try {
         const size = fstatSync(fd).size;
@@ -263,7 +328,7 @@ export const tools = {
         readSync(fd, buf, 0, buf.length, 0);
         const text = buf.toString('utf8');
         return size > MAX_READ
-          ? `${text}\n... [truncated at ${MAX_READ} bytes of ${size}]`
+          ? `${text}\n... [truncated at ${MAX_READ} bytes of ${size}]; use lines="…" to read further`
           : text;
       } finally {
         closeSync(fd);
@@ -363,6 +428,119 @@ edit: {
       return out.length ? out.join('\n') : '(empty)';
     },
   },
+
+  tree: {
+    summary: 'list a directory and everything under it, in one go',
+    describe: (a) => `tree ${a.path || '.'}${a.depth ? ` (depth ${a.depth})` : ''}`,
+    usage: '<copilot:tree path="src" depth="3"/>\n'
+      + '# path and depth may be left out; the default is the whole workspace.',
+    run(ctx, a) {
+      const { rootReal, full } = dirArg(ctx, a.path);
+      const maxDepth = intArg(a.depth, TREE_DEPTH, 1, 20, 'depth') - 1;
+      const out = [];
+      let files = 0; let dirs = 0; let truncated = false;
+      // Full paths, one per line, rather than indentation: a path still reads
+      // correctly if the page runs lines together, where an indented tree
+      // turns into soup.
+      walk(full, 0, maxDepth, (e, p) => {
+        if (out.length >= MAX_TREE) { truncated = true; return false; }
+        const rel = relOf(rootReal, p);
+        if (e.isSymbolicLink()) { out.push(`${rel}  (symlink, not followed)`); return true; }
+        if (e.isDirectory()) { dirs++; out.push(`${rel}/`); return true; }
+        files++;
+        let size = '';
+        try { size = `  ${lstatSync(p).size}b`; } catch { /* raced */ }
+        out.push(`${rel}${size}`);
+        return true;
+      });
+      if (!out.length) return '(empty)';
+      out.push(truncated
+        ? `... [stopped at ${MAX_TREE} entries; tree a subdirectory, or use a smaller depth]`
+        : `(${files} files, ${dirs} directories)`);
+      return out.join('\n');
+    },
+  },
+
+  search: {
+    summary: 'find text in files; shows file:line: text for each match',
+    describe: (a) => `search ${a.regex === 'true' ? 'regex ' : ''}"${a.query || ''}"${a.path ? ` in ${a.path}` : ''}${a.glob ? ` (${a.glob})` : ''}`,
+    usage: '<copilot:search query="parseToolTags" path="src" glob="*.mjs" context="2"/>\n'
+      + '# only query is needed. regex="true" makes it a regular expression;'
+      + ' case="true" matches case exactly.',
+    run(ctx, a) {
+      if (typeof a.query !== 'string' || !a.query) throw new ToolError('no query given');
+      const { rootReal, full } = dirArg(ctx, a.path);
+      const context = intArg(a.context, 0, 0, 5, 'context');
+      const flags = a.case === 'true' ? '' : 'i';
+      let re;
+      try {
+        re = a.regex === 'true'
+          ? new RegExp(a.query, flags)
+          : new RegExp(a.query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+      } catch (e) { throw new ToolError(`not a valid regular expression: ${e.message}`); }
+      const nameOk = a.glob ? globToRegExp(a.glob) : null;
+
+      const out = [];
+      let matches = 0; let filesHit = 0; let skippedLarge = 0; let stopped = false;
+      walk(full, 0, 50, (e, p) => {
+        if (!e.isFile()) return true;
+        if (nameOk && !nameOk.test(e.name)) return true;
+        let st;
+        try { st = lstatSync(p); } catch { return true; }
+        if (st.size > MAX_SEARCH_BYTES) { skippedLarge++; return true; }
+        let buf;
+        try {
+          const fd = openRegular(p, relOf(rootReal, p));
+          try { buf = readFileSync(fd); } finally { closeSync(fd); }
+        } catch { return true; }
+        if (buf.subarray(0, 8000).includes(0)) return true;          // binary
+        const lines = buf.toString('utf8').split(/\r?\n/);
+        const rel = relOf(rootReal, p);
+        let inFile = 0; let lastShown = -1;
+        for (let i = 0; i < lines.length; i++) {
+          if (!re.test(lines[i].slice(0, 4000))) continue;
+          if (inFile === 0) filesHit++;
+          inFile++; matches++;
+          if (inFile > MAX_PER_FILE) { if (inFile === MAX_PER_FILE + 1) out.push(`${rel}: ... [more matches in this file not shown]`); continue; }
+          const from = Math.max(lastShown + 1, i - context);
+          if (context && lastShown >= 0 && from > lastShown + 1) out.push('--');
+          for (let j = from; j <= Math.min(lines.length - 1, i + context); j++) {
+            const text = lines[j].length > MAX_LINE_SHOWN ? `${lines[j].slice(0, MAX_LINE_SHOWN)}…` : lines[j];
+            out.push(`${rel}:${j + 1}${j === i ? ':' : '-'} ${text}`);
+            lastShown = j;
+          }
+          if (matches >= MAX_MATCHES) { stopped = true; return false; }
+        }
+        return true;
+      });
+      if (!matches) return `no matches for "${a.query}"${skippedLarge ? ` (${skippedLarge} files over 1 MB were not searched)` : ''}`;
+      out.push(stopped
+        ? `... [stopped at ${MAX_MATCHES} matches; narrow it with path, glob, or a more specific query]`
+        : `(${matches} match${matches === 1 ? '' : 'es'} in ${filesHit} file${filesHit === 1 ? '' : 's'}${skippedLarge ? `; ${skippedLarge} files over 1 MB not searched` : ''})`);
+      return out.join('\n');
+    },
+  },
 };
+
+// Lines of a file, numbered, with the total so the model knows what is left.
+function readRange(full, shown, spec) {
+  const fd = openRegular(full, shown);
+  let text;
+  try { text = readFileSync(fd, 'utf8'); } finally { closeSync(fd); }
+  const lines = text.split(/\r?\n/);
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  const { from, to } = parseRange(spec, lines.length);
+  if (from > lines.length) throw new ToolError(`${shown} has only ${lines.length} lines`);
+  const width = String(to).length;
+  const body = [];
+  let bytes = 0;
+  for (let i = from; i <= to; i++) {
+    const line = `${String(i).padStart(width)}: ${lines[i - 1]}`;
+    bytes += line.length + 1;
+    if (bytes > MAX_READ) { body.push(`... [stopped at ${MAX_READ} bytes; read from line ${i}]`); break; }
+    body.push(line);
+  }
+  return [`${shown} lines ${from}-${to} of ${lines.length} (the numbers are not part of the file)`, ...body].join('\n');
+}
 
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);

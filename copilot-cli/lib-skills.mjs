@@ -32,7 +32,7 @@ export const filesSkill = {
   id: 'files',
   name: 'Local Files (Code)',
   domain: 'code',
-  summary: 'Read, list, write, and edit files in the workspace root.',
+  summary: 'Read, list, search, write, and edit files in the workspace root.',
   mutates: true,
   sampleTag: '<copilot:read path="src/index.js"/>',
   isAvailable: () => ({ available: true, detail: 'workspace root' }),
@@ -47,6 +47,11 @@ export const filesSkill = {
     '- write replaces the whole file. Emit the complete new contents, never a diff',
     '  and never a fragment with "... rest unchanged".',
     '- The body of a write tag is literal file content. Do not escape it.',
+    '- Every tool call costs a round trip, so ask for what you need in one go: tree',
+    '  to see the whole project, search to find where something is, then read with',
+    '  lines="..." for just that part. Several tags in one reply all run.',
+    '- The line numbers that read and search show are not part of the file. Never',
+    '  put them in an edit SEARCH block or in a write.',
   ],
 };
 
