@@ -29,7 +29,7 @@ import { CDP, findTab } from './lib-cdp.mjs';
 import { expandPrompt, withStdin } from './lib-files.mjs';
 import { askInPage } from './page-fn.mjs';
 import { VERSION } from './lib-version.mjs';
-import { createAgentSession, runAgent, defaultTools } from './lib-agent.mjs';
+import { createAgentSession, runAgent, defaultTools, parseToolTags } from './lib-agent.mjs';
 import { resolveRoot, ToolError } from './lib-fstools.mjs';
 import { loadMailConfig, configComplaint, mailTools, readMail, listFolders, probeEwsSearch } from './lib-mailtool.mjs';
 import { createDefaultRegistry, parseAgentCommand, formatSkillsList } from './lib-skills.mjs';
@@ -290,7 +290,24 @@ async function runTurn(cdp, raw, stdinText) {
   const text = await askPage(cdp, full);
   if (text === null) return false;
   out(text);
+  lastPlainReply = text;
   return true;
+}
+
+// The reply to the last plain-chat turn, so tool calls in it can be run.
+let lastPlainReply = null;
+
+/**
+ * Tool calls in a plain-chat reply. Plain chat never runs tools, but a
+ * conversation that already holds the agent instructions will answer in
+ * tags anyway, and the bridge then looked frozen: six searches printed and
+ * nothing happening (live report, 2026-09-23).
+ */
+function toolCallsIn(text, root) {
+  try {
+    const { tools } = registry.resolve('default', { root });
+    return parseToolTags(text || '', tools).map((c) => c.name);
+  } catch { return []; }
 }
 
 /**
@@ -382,7 +399,7 @@ function approver({ yes, question }) {
 }
 
 /** Run one agent task to completion over an already-attached page. */
-async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv, skillName = 'default' }) {
+async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv, skillName = 'default', firstReply = null }) {
   let sess = session;
   if (!sess) {
     try {
@@ -440,6 +457,7 @@ async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv, 
     minTurnGapMs: Number(process.env.AGENT_TURN_GAP_MS || 2000),
     maxBusyRetries: Number(process.env.AGENT_BUSY_RETRIES || 3),
     maxMessageChars: LOCAL.maxPromptChars,
+    firstReply,
     tools: resolved.tools,
     skills: resolved.activeSkills,
   });
@@ -1010,8 +1028,27 @@ async function main() {
 
     out('');
     cdp = await ensureAttached(cdp);
+    lastPlainReply = null;
     if (cdp) await runTurn(cdp, q, '');
     out('');
+    const calls = toolCallsIn(lastPlainReply, rootArg || LOCAL.cwd);
+    if (cdp && calls.length) {
+      const counts = {};
+      for (const c of calls) counts[c] = (counts[c] || 0) + 1;
+      const what = Object.entries(counts).map(([n, k]) => (k > 1 ? `${n} ×${k}` : n)).join(', ');
+      note(`[bridge] Copilot answered with ${calls.length} tool call${calls.length === 1 ? '' : 's'} (${what}). Plain chat does not run tools.`);
+      const a = (await ask('[bridge] run them as an agent, continuing from this reply? [y/N] ')).trim().toLowerCase();
+      if (a === 'y' || a === 'yes') {
+        if (!agentSession) {
+          try { agentSession = createAgentSession(resolveRoot(rootArg || LOCAL.cwd)); } catch (e) { note('[agent] ' + e.message); rl.prompt(); return; }
+        }
+        await runAgentTask(cdp, q, {
+          yes, question: ask, session: agentSession, mailEnv, skillName: 'default', firstReply: lastPlainReply,
+        });
+      } else {
+        note('[bridge] not run. Start a request with /agent to let it use tools.');
+      }
+    }
     rl.prompt();
   });
 

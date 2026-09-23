@@ -444,15 +444,20 @@ export async function runAgent({
   skills = null,
   maxMessageChars = MESSAGE_LIMIT,
   minTurnGapMs = 2000, maxBusyRetries = 3,
+  // A reply the page has already given, whose tool calls should be run as
+  // this task's first step instead of asking again. Used when plain chat got
+  // tool calls back: the conversation already holds the instructions.
+  firstReply = null,
 }) {
   const ctx = { root: session.root };
 
   // The instructions are sent once. The tab holds the conversation, so
   // repeating them every task would pay for context the session already has.
-  let prompt = session.primed
+  let prompt = session.primed || firstReply
     ? task
     : `${renderSystemPrompt(session.root, tools, { skills })}\n\nTASK: ${task}`;
   session.primed = true;
+  let pending = firstReply;
 
   let busyRetries = 0;
   let lastTurnAt = 0;
@@ -463,6 +468,14 @@ export async function runAgent({
     // A minimum gap between turns. The loop used to fire them back to back
     // as fast as the page would answer, which is indistinguishable from an
     // attack from the far end.
+    let reply;
+    let givenReply = false;
+    if (pending !== null && pending !== undefined) {
+      reply = pending;                       // already on the page; nothing is sent
+      pending = null;
+      givenReply = true;
+    } else {
+    // A minimum gap between turns (see above).
     const since = Date.now() - lastTurnAt;
     if (lastTurnAt && since < minTurnGapMs) {
       await new Promise((r) => setTimeout(r, minTurnGapMs - since));
@@ -475,12 +488,13 @@ export async function runAgent({
     if (prompt.length > maxMessageChars) {
       return { done: false, steps: step - 1, stalled: `the message would be ${prompt.length} characters, over the ${maxMessageChars} the chat is known to accept; nothing was sent` };
     }
-    const reply = await ask(prompt);
+    reply = await ask(prompt);
     if (reply === null || reply === undefined) {
       // Either the page was busy and nothing was sent, or the answer could
       // not be read. Both mean stop: another turn would be a message into a
       // service whose state we do not know.
       return { done: false, steps: step, stalled: 'no answer came back, so the run stops rather than sending again' };
+    }
     }
 
     // The service pushing back is not a retryable condition. Asking again
@@ -518,7 +532,7 @@ export async function runAgent({
     }
 
     const prose = proseOf(reply);
-    if (prose) ui.prose(prose);
+    if (prose && !givenReply) ui.prose(prose);       // a given reply was already printed
 
     const calls = parseToolTags(reply, tools);
     if (calls.unknown && calls.unknown.length && calls.length && ui.unknownTag) {
