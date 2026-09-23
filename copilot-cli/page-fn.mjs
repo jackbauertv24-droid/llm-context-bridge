@@ -468,6 +468,19 @@ export async function askInPage(cfg) {
   // prompt does — so two submissions went out back to back with nothing
   // checked in between. It is now attempt two, and only if attempt one is
   // seen to have failed.
+  //
+  // How many times the end of this prompt is on the page already, outside
+  // the box. Every agent follow-up ends with the same sentence, so from the
+  // second one on, the earlier copies made "our text is in the
+  // conversation" true before anything was sent: a failed Enter counted as
+  // delivered, no second attempt was made, and the previous answer came back
+  // as the reply (RECORDED in a live log, 2026-09-23). Only a new copy counts.
+  const echoTail = visibleText(cfg.prompt).slice(-60);
+  const echoCount = (el) => {
+    if (!el || !echoTail) return 0;
+    try { return visibleText(el.innerText).split(echoTail).length - 1; } catch { return 0; }
+  };
+  const echoBase = echoCount(document.body) - echoCount(composer);
   fireEnter(input);
 
   const sentAt = Date.now();
@@ -609,7 +622,7 @@ export async function askInPage(cfg) {
   };
   const promptEchoed = () => {
     if (!promptTail) return false;
-    return countIn(document.body) > countIn(composer);
+    return countIn(document.body) - countIn(composer) > echoBase;
   };
 
   const sendRegistered = () => promptEchoed()
@@ -662,6 +675,21 @@ export async function askInPage(cfg) {
     log(`send registered after ${submissions} submission${submissions === 1 ? '' : 's'}`);
   } else {
     log(`send did NOT register after ${submissions} submission${submissions === 1 ? '' : 's'}; giving up rather than sending again`);
+    // Nothing new is on the page, so there is nothing to read: carrying on
+    // would only find the previous answer and hand it back as this one.
+    obs.disconnect();
+    clearInterval(watchStop);
+    wait.via = 'not-sent-not-registered';
+    wait.ms = Date.now() - sentAt;
+    debug.wait = wait;
+    return {
+      ok: false,
+      notSent: true,
+      text: '',
+      method: 'not sent: the page did not take the message (Enter, then the send button). '
+        + 'It is still in the Copilot box; press send there or clear it, then run this again.',
+      debug,
+    };
   }
 
   // 6. wait for the answer to be finished

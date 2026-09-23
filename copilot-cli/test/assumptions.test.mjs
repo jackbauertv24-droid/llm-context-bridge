@@ -22,7 +22,7 @@ test('every way of refusing to send is one of the justified ones', () => {
   // Each `notSent: true` in the page function must carry a via: that is on
   // the list, so a new refusal cannot be added without appearing here.
   const reasons = [...pageFn.matchAll(/via: '(not-sent-[a-z-]+)'/g)].map((m) => m[1]);
-  const allowed = ['not-sent-page-busy', 'not-sent-bad-composer', 'not-sent-box-not-empty'];
+  const allowed = ['not-sent-page-busy', 'not-sent-bad-composer', 'not-sent-box-not-empty', 'not-sent-not-registered'];
   for (const r of reasons) {
     assert.ok(allowed.includes(r), `a new refusal "${r}" was added without being justified in ASSUMPTIONS.md`);
   }

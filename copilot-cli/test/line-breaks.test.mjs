@@ -23,11 +23,15 @@ function page({ lineBreak = 'works', lingerMs = 0, strayTestid = false } = {}) {
   const state = { submits: 0, sent: [] };
   const feed = new El('div', {});
   doc.body.append(feed);
-  const composer = new El('div', {});
+  // RECORDED nesting: div.fai-BebopLiteChatInput > div wrapper > span.fai-EditorInput > span#input
+  const composer = new El('div', { class: 'fai-BebopLiteChatInput' });
+  const wrapper = new El('div', { class: 'fai-BebopLiteChatInput__inputWrapper' });
+  const editor = new El('span', { class: 'fai-EditorInput' });
   const input = new El('span', { id: 'm365-chat-editor-target-element', role: 'textbox', contenteditable: 'true' });
   input.rect = { x: 735, y: 495, width: 704, height: 27 };
-  composer.append(input);
+  composer.append(wrapper); wrapper.append(editor); editor.append(input);
   doc.body.append(composer);
+  state.composer = composer;
   doc._editor = input;
   if (strayTestid) {
     // Not a button, always visible, test id containing "stop".
@@ -131,4 +135,59 @@ test('an element that is not a button, with "stop" in its test id, does not hold
   const { res, ms } = await ask('hi (probe-abc123)', { strayTestid: true });
   assert.equal(res.debug.wait.via, 'stop-control-gone');
   assert.ok(ms < 8000, `took ${ms}ms`);
+});
+
+// RECORDED in a live log (2026-09-23): every agent follow-up ends with the
+// same sentence, so an earlier follow-up already on the page made a failed
+// Enter look delivered. No second attempt was made, and the previous answer
+// came back as the reply.
+function conversationWithEarlierFollowUp(state, { enterWorks, buttonWorks }) {
+  const feed = doc.body.children[0];
+  const echo = new El('div', {});
+  echo.append(new El('div', {}, '<copilot:result tool="list" status="ok">README.md</copilot:result>Continue, or reply with prose and no tags if the task is done.'));
+  feed.append(echo);
+  const old = new El('div', { 'data-testid': 'lastChatMessage' });
+  const md = new El('div', { 'data-testid': 'markdown-reply' });
+  md.append(new El('p', {}, 'THE PREVIOUS ANSWER'));
+  old.append(md);
+  feed.append(old);
+  const input = doc.querySelector('#m365-chat-editor-target-element');
+  const send = new El('button', { 'aria-label': 'Send' });
+  state.composer.append(send);
+  const handlers = input._on.keydown;
+  input._on.keydown = [(ev) => { if (ev.key === 'Enter') { ev.preventDefault(); if (enterWorks) handlers[0](ev); } }];
+  send.addEventListener('click', () => { if (buttonWorks) handlers[0]({ key: 'Enter', preventDefault() {} }); });
+}
+
+async function askFollowUp(opts) {
+  const restore = installGlobals();
+  const saved = doc.execCommand;
+  try {
+    const state = page({ lineBreak: 'ignored' });
+    conversationWithEarlierFollowUp(state, opts);
+    const prompt = '<copilot:result tool="read" status="ok">\nfile text\n</copilot:result>\n\nContinue, or reply with prose and no tags if the task is done.';
+    const res = await askInPage({ inputSelector: '#m365-chat-editor-target-element', answerSelector: '[data-testid="markdown-reply"]', prompt, quietMs: 1500, answerTimeoutMs: 30000, sendVerifyMs: 2000 });
+    return { state, res };
+  } finally { doc.execCommand = saved; restore(); }
+}
+
+test('a follow-up whose Enter does not take is not counted as sent: the send button is tried once', async () => {
+  const { state, res } = await askFollowUp({ enterWorks: false, buttonWorks: true });
+  assert.equal(state.submits, 1, 'sent once, by the button');
+  assert.ok(res.debug.steps.some((s) => /clicking send once/.test(s)), res.debug.steps.join(' | '));
+  assert.notEqual(res.text, 'THE PREVIOUS ANSWER');
+});
+
+test('when neither Enter nor the button takes it: reported as not sent, and the previous answer is not returned', async () => {
+  const { state, res } = await askFollowUp({ enterWorks: false, buttonWorks: false });
+  assert.equal(state.submits, 0);
+  assert.equal(res.notSent, true);
+  assert.equal(res.text, '');
+  assert.match(res.method, /still in the Copilot box/);
+});
+
+test('a follow-up whose Enter works is sent once and nothing else is tried', async () => {
+  const { state, res } = await askFollowUp({ enterWorks: true, buttonWorks: true });
+  assert.equal(state.submits, 1);
+  assert.ok(!res.debug.steps.some((s) => /clicking send once/.test(s)));
 });

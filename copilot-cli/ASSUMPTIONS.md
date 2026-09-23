@@ -46,7 +46,7 @@ Evidence has three strengths:
 
 ## What blocks, and what each blocking check rests on
 
-There are exactly five ways a message is not sent. Every one is RECORDED or
+There are exactly five ways a message is refused. (A sixth outcome, `not-sent-not-registered`, is not a refusal: it reports that Enter and the send button were both tried once and the page took neither, so the text is still in the box and nothing is read back — reading on would only find the previous answer.) Every one is RECORDED or
 trivially true:
 
 1. **The page is generating** — assumptions 4 and 5, both recorded. A visible
