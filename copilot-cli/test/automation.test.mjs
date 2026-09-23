@@ -124,10 +124,17 @@ test('DOM: detects "Please wait for current response" and flags busy: true', asy
     const composer = new El('div', { class: 'composer' });
     composer.append(input, sendBtn);
 
-    // Simulate response region where Copilot displays the busy message
-    const replyRegion = new El('div', { 'data-testid': 'markdown-reply' }, 'Copilot said:\nPlease wait for the current response to finish.');
-    doc.body.append(composer, replyRegion);
+    doc.body.append(composer);
     doc._editor = input;
+    // Copilot answers the message itself with the busy notice. (A notice
+    // already on the page before sending belongs to an earlier turn; reading
+    // it as this turn's reply is the stale-answer fault fixed in .4.)
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      setTimeout(() => { input.textContent = ''; }, 50);
+      setTimeout(() => doc.body.append(new El('div', { 'data-testid': 'markdown-reply' }, 'Please wait for the current response to finish.')), 100);
+    });
 
     const res = await askInPage({
       inputSelector: '#m365-chat-editor-target-element',
@@ -167,7 +174,10 @@ test('DOM: short-circuits gracefully when send button is absent or unclickable',
     const elapsed = Date.now() - start;
     assert.ok(res);
     assert.ok(elapsed < 12000, `expected short-circuit within ~8-10s, but took ${elapsed}ms`);
-    assert.equal(res.debug.wait.via, 'send-not-triggered');
+    // Since .4: reported as not sent, text still in the box, instead of
+    // waiting and then reading whatever answer was already on the page.
+    assert.equal(res.debug.wait.via, 'not-sent-not-registered');
+    assert.equal(res.notSent, true);
   } finally {
     restore();
   }

@@ -58,7 +58,9 @@ const CONFIG = {
 const LOCAL = {
   cwd: process.cwd(),
   maxFileBytes: Number(process.env.MAX_FILE_BYTES || 256 * 1024),
-  maxPromptChars: Number(process.env.MAX_PROMPT_CHARS || 100000),
+  // RECORDED: 30,019 characters were accepted; a longer message left the
+  // send button disabled. See MESSAGE_LIMIT in lib-agent.mjs.
+  maxPromptChars: Number(process.env.MAX_PROMPT_CHARS || 30000),
   stdinLabel: process.env.STDIN_LABEL || 'stdin',
 };
 
@@ -437,6 +439,7 @@ async function runAgentTask(cdp, task, { root, yes, question, session, mailEnv, 
     ui: agentUI(),
     minTurnGapMs: Number(process.env.AGENT_TURN_GAP_MS || 2000),
     maxBusyRetries: Number(process.env.AGENT_BUSY_RETRIES || 3),
+    maxMessageChars: LOCAL.maxPromptChars,
     tools: resolved.tools,
     skills: resolved.activeSkills,
   });

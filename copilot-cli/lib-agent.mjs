@@ -369,16 +369,50 @@ export function proseOf(text) {
   return prose;
 }
 
+/**
+ * The longest message the chat page is known to take. RECORDED
+ * (2026-09-23): a 30,019-character message was accepted; a longer one, from
+ * an agent run, left the send button disabled and the text stuck in the box.
+ * The real limit lies somewhere above this and is not known, so this is the
+ * size that is proven to work, not a guess at the ceiling.
+ */
+export const MESSAGE_LIMIT = 30000;
+
 // Feeds results back as the next turn's prompt. Same tag shape as the calls, so
 // the model sees one consistent syntax rather than two.
-export function renderResults(results) {
-  const parts = results.map((r) => [
-    `<${NS}:result tool="${r.name}" status="${r.ok ? 'ok' : 'error'}">`,
-    r.output,
-    `</${NS}:result>`,
-  ].join('\n'));
-  parts.push('', 'Continue, or reply with prose and no tags if the task is done.');
-  return parts.join('\n');
+//
+// Kept under the message limit: when the outputs together would not fit,
+// each one over its fair share is cut, and says so — how much was cut and
+// how to get the rest — so the model can ask for less instead of the run
+// jamming the page with a message it will not send.
+export function renderResults(results, { maxChars = MESSAGE_LIMIT } = {}) {
+  const build = (outs) => {
+    const parts = results.map((r, i) => [
+      `<${NS}:result tool="${r.name}" status="${r.ok ? 'ok' : 'error'}">`,
+      outs[i],
+      `</${NS}:result>`,
+    ].join('\n'));
+    parts.push('', 'Continue, or reply with prose and no tags if the task is done.');
+    return parts.join('\n');
+  };
+  const outs = results.map((r) => String(r.output ?? ''));
+  const whole = build(outs);
+  if (whole.length <= maxChars) return whole;
+
+  const NOTE_ROOM = 320;
+  const fixed = whole.length - outs.reduce((n, o) => n + o.length, 0);
+  let room = Math.max(0, maxChars - fixed - NOTE_ROOM * outs.length);
+  // Fair shares, smallest first: an output under its share keeps all of it
+  // and leaves the rest to the others.
+  const share = new Array(outs.length);
+  const order = outs.map((o, i) => i).sort((a, b) => outs[a].length - outs[b].length);
+  order.forEach((i, k) => {
+    const fair = Math.floor(room / (order.length - k));
+    share[i] = Math.min(outs[i].length, fair);
+    room -= share[i];
+  });
+  const cut = outs.map((o, i) => (o.length <= share[i] ? o : `${o.slice(0, share[i])}\n... [cut: ${share[i]} of ${o.length} characters shown, to keep this message under the ${maxChars} characters the chat accepts. Ask for less: read with lines="...", a narrower search (path, glob), or tree on a subdirectory.]`));
+  return build(cut);
 }
 
 // ---------------------------------------------------------------- the loop
@@ -408,6 +442,7 @@ export async function runAgent({
   ask, task, session, maxSteps = 16, approve = async () => true, ui,
   tools = defaultTools,
   skills = null,
+  maxMessageChars = MESSAGE_LIMIT,
   minTurnGapMs = 2000, maxBusyRetries = 3,
 }) {
   const ctx = { root: session.root };
@@ -434,6 +469,12 @@ export async function runAgent({
     }
     lastTurnAt = Date.now();
 
+    // A message over the limit would sit in the box with the send button
+    // disabled. Results are already cut to fit; this catches a task that is
+    // itself too long, before anything is typed.
+    if (prompt.length > maxMessageChars) {
+      return { done: false, steps: step - 1, stalled: `the message would be ${prompt.length} characters, over the ${maxMessageChars} the chat is known to accept; nothing was sent` };
+    }
     const reply = await ask(prompt);
     if (reply === null || reply === undefined) {
       // Either the page was busy and nothing was sent, or the answer could
@@ -554,7 +595,7 @@ export async function runAgent({
         results.push({ name: call.name, ok: false, output: msg });
       }
     }
-    prompt = renderResults(results);
+    prompt = renderResults(results, { maxChars: maxMessageChars });
   }
   return { done: false, steps: maxSteps, stalled: `hit the ${maxSteps}-step limit` };
 }
