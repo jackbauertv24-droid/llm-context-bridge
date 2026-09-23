@@ -100,8 +100,14 @@ export async function askInPage(cfg) {
     || input.parentElement;
 
   // Pre-flight check: ensure Copilot is not currently streaming a previous answer
-  const stopSelector = cfg.stopSelector
-    || 'button[aria-label*="stop" i], button[title*="stop" i], [data-testid*="stop" i]';
+  // RECORDED (2026-09-23, seven turns): the control is a button labelled
+  // "Stop generating". The wider selector that used to be here also took
+  // any element whose title or test id contained "stop". A turn that
+  // finished in 6 seconds was held for 36 by something this selector saw;
+  // whether that was the real button lingering (the recording shows it can,
+  // for 50 seconds) or another element is not known. Matching only what was
+  // recorded removes the second possibility; the stale net handles the first.
+  const stopSelector = cfg.stopSelector || 'button[aria-label*="stop" i]';
   const stopNow = () => {
     try {
       for (const el of document.querySelectorAll(stopSelector)) if (vis(el)) return el;
@@ -280,26 +286,52 @@ export async function askInPage(cfg) {
     // "Blast" put "BlastBlast" in the box. execCommand already fires a real
     // beforeinput and input pair of its own; the manual one was pure
     // duplication.
-    try { document.execCommand('insertText', false, cfg.prompt); } catch { /* checked below */ }
-
-    // Verify rather than assume. Too much text is as wrong as too little,
-    // and the doubling above went unnoticed because the old check used
-    // !== on trimmed text and then *appended* a correction.
-    if (compareText(input.innerText) !== compareText(cfg.prompt)) {
-      // Repairing this is a safety net, not a success. Recorded, because a
-      // silent repair hides the fault that made it necessary: the doubled
-      // insert was corrected here and so looked fine from the outside.
-      composerCorrected = true;
-      log(`the first insert produced ${norm(input.innerText || '').length} characters `
-        + `where ${norm(cfg.prompt).length} were expected; setting the text directly`);
-      clearComposer();
-      input.textContent = cfg.prompt;
-      try {
-        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
-      } catch {
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-      }
+    //
+    // RECORDED (2026-09-23): typing text that contains line breaks puts it
+    // in the box with every line break removed — held = typed − newlines, on
+    // all five multi-line messages — and the message goes out as one line.
+    // The box does take line breaks from Shift+Enter, which arrives as an
+    // insertLineBreak. So one is tried first, in the EMPTY box: if it adds
+    // a line, the prompt is typed line by line with breaks between; if not,
+    // it is typed whole, exactly as before. Trying it in an empty box means
+    // that even a page that treated it as "send" would have nothing to send.
+    const lines = String(cfg.prompt).split(/\r?\n/);
+    const newlinesIn = () => (String(input.innerText || '').match(/\n/g) || []).length;
+    const lineBreaks = { typed: lines.length - 1, method: 'none needed' };
+    if (lines.length > 1) {
+      const before = newlinesIn();
+      try { document.execCommand('insertLineBreak', false); } catch { /* measured below */ }
+      await sleep(150);
+      lineBreaks.probeAdded = newlinesIn() - before;
+      lineBreaks.method = lineBreaks.probeAdded > 0 ? 'insertLineBreak between lines' : 'typed whole (line breaks will be lost)';
+      if (lineBreaks.probeAdded <= 0) log('this page did not take a line break from insertLineBreak; the message goes as one line');
     }
+    if (lineBreaks.probeAdded > 0) {
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i]) { try { document.execCommand('insertText', false, lines[i]); } catch { /* checked below */ } }
+        if (i < lines.length - 1) { try { document.execCommand('insertLineBreak', false); } catch { /* checked below */ } }
+      }
+    } else {
+      try { document.execCommand('insertText', false, cfg.prompt); } catch { /* checked below */ }
+    }
+
+    // The editor draws what was typed a moment later, not at once. Reading
+    // it straight away found 0 characters on the real page, and the
+    // "repair" that followed wrote the text in directly — which this editor
+    // ignores, and which is the kind of second insert that once doubled a
+    // message. So wait for it to appear and settle, and never write it in
+    // a second time.
+    const settleStart = Date.now();
+    let lastSeen = -1;
+    while (Date.now() - settleStart < 2000) {
+      await sleep(100);
+      const n = visibleText(input.innerText).length;
+      if (n > 0 && n === lastSeen) break;
+      lastSeen = n;
+    }
+    lineBreaks.held = newlinesIn();
+    lineBreaks.settleMs = Date.now() - settleStart;
+    debug.lineBreaks = lineBreaks;
   } else {
     const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
@@ -688,7 +720,12 @@ export async function askInPage(cfg) {
       // seconds by default, and a slow backend pausing that long mid-answer
       // was cut off and its half-written reply taken as final. Thirty
       // seconds of complete silence is stuck; five is slow.
-      const staleAfter = Math.max(quietMs * 3, 30000);
+      // RECORDED: the longest silence in the middle of an answer, over six
+      // turns, was 4.2 seconds. Once an answer has text, twelve seconds of
+      // silence with the stop button still up is a button left behind (the
+      // real one stayed up 50 seconds after a two-letter reply). Before any
+      // answer text, the page may still be thinking, so the wait is longer.
+      const staleAfter = newBlock ? Math.max(quietMs * 3, 12000) : Math.max(quietMs * 3, 30000);
       const stale = trustStop && wait.sawStop && sinceGrowth > staleAfter;
 
       if (grew && (finished || quiet || stale)) {
