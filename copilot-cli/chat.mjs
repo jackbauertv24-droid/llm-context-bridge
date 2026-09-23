@@ -116,6 +116,7 @@ With an authenticated Confluence tab open in Chrome:
 
 With mail.env set up, the agent also gets a read-only view of your mail:
 
+  node chat.mjs --record-chat        record two chat turns once, for diagnosis
   node chat.mjs --record             record what the real page is and does
   node chat.mjs --record --as-agent  record it with the real agent prompt
   node chat.mjs --mail-check          check the setup, one run, changes nothing
@@ -698,6 +699,34 @@ async function runMailCheck(args) {
  * composer empty on send, how much does the page move when nothing is
  * happening, and how does an answer arrive.
  */
+/**
+ * One run that records everything, then checks Confluence and mail.
+ *
+ * Sends exactly two messages into the chat — the real agent prompt, and the
+ * real shape of a tool result — and records both turns in full. Then runs
+ * the Confluence check and the mail check, neither of which sends anything
+ * to the chat. Each stage runs whatever happened to the one before, so a
+ * failure in one still leaves the others' evidence behind.
+ */
+/**
+ * One run that records the chat page: two turns of plain request and
+ * response. The work is in lib-record-run.mjs, where it can be exercised
+ * before it is used.
+ */
+async function runRecordAll(cdp) {
+  const { runRecordAllWith } = await import('./lib-record-run.mjs');
+  await runRecordAllWith({
+    evalFn: (fn, arg, opts) => cdp.evalFn(fn, arg, opts),
+    note,
+    write: (file, text) => fs.writeFileSync(file, text),
+    registry,
+    root: LOCAL.cwd,
+    config: CONFIG,
+    version: VERSION,
+  });
+  return true;
+}
+
 async function runRecord(cdp, args) {
   const pi = args.indexOf('--prompt');
   let probePrompt = pi !== -1 ? args[pi + 1] : 'ping';
@@ -841,6 +870,8 @@ async function main() {
   const replayFile = takeFlag(args, '--replay');
   if (replayFile !== undefined) { process.exit((await runReplay(replayFile, args)) ? 0 : 2); }
 
+  const wantsRecordAll = args.includes('--record-chat');
+  if (wantsRecordAll) takeBool(args, '--record-chat');
   const wantsRecord = args.includes('--record');
   if (wantsRecord) takeBool(args, '--record');
 
@@ -881,6 +912,12 @@ async function main() {
   const stdinText = piped && task === undefined ? await readStdin() : '';
 
   let cdp = await attach();
+
+  if (wantsRecordAll) {
+    const okay = await runRecordAll(cdp);
+    cdp.close();
+    process.exit(okay ? 0 : 1);
+  }
 
   if (wantsRecord) {
     const okay = await runRecord(cdp, args);

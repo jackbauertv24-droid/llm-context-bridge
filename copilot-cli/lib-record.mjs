@@ -281,3 +281,352 @@ export async function recordPage(cfg) {
 
   return out;
 }
+
+// ======================================================================
+// recordConversation — the comprehensive recording, taken once.
+//
+// The first recording used a four-letter word and a single turn, and so it
+// said nothing about the three things that went on to break: what the
+// composer does to a long, structured agent prompt; how a reply containing a
+// code block comes back out of the page; and whether a second turn in the
+// same chat is read as the new answer rather than the old one. This records
+// a real two-turn agent exchange — the actual agent prompt, then the actual
+// shape of a tool result — and keeps everything needed to answer those
+// questions without asking again.
+//
+// What it keeps verbatim, and why that is safe:
+//   - what was typed and what the composer then held. The composer is
+//     cleared and confirmed empty first, so both are this code's own text.
+//     If it cannot be cleared, the turn is abandoned and nothing is sent,
+//     because typing on top of a leftover draft would send that draft too.
+//   - the page's echo of the sent message, found by a random marker carried
+//     in the prompt and bounded so that it cannot grow to take in anything
+//     around it.
+//   - the reply, but only answer elements that did not exist before this
+//     turn was sent — the reply to our own probe, never earlier replies.
+// Nothing else on the page is read as text: prior conversation contributes
+// counts and element shapes only.
+//
+// What it will not do: send more than one message per turn, send anything
+// into a page that is still generating, click a send button, or retry. A
+// turn whose send does not register ends the recording.
+// ======================================================================
+export async function recordConversation(cfg) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const safe = (fn, fallback = null) => { try { const v = fn(); return v === undefined ? fallback : v; } catch { return fallback; } };
+  const vis = (el) => safe(() => {
+    const r = el.getBoundingClientRect();
+    const st = typeof getComputedStyle === 'function' ? getComputedStyle(el) : { visibility: 'visible', display: 'block' };
+    return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
+  }, false);
+  const pathOf = (el) => {
+    const bits = [];
+    for (let e = el; e && e.tagName && bits.length < 6; e = e.parentElement) {
+      let b = e.tagName.toLowerCase();
+      if (e.id) b += `#${e.id}`;
+      const t = safe(() => e.getAttribute('data-testid'));
+      if (t) b += `[${t}]`;
+      bits.unshift(b);
+    }
+    return bits.join(' > ');
+  };
+  // Shape only. Never text: text is taken deliberately, in the few places
+  // above where it is known to be ours.
+  const describe = (el) => (el ? {
+    path: pathOf(el),
+    tag: safe(() => el.tagName.toLowerCase(), '?'),
+    id: el.id || undefined,
+    cls: (safe(() => el.getAttribute('class'), '') || '').slice(0, 160) || undefined,
+    testid: safe(() => el.getAttribute('data-testid')) || undefined,
+    role: safe(() => el.getAttribute('role')) || undefined,
+    ariaLabel: safe(() => el.getAttribute('aria-label')) || undefined,
+    title: safe(() => el.getAttribute('title')) || undefined,
+    type: safe(() => el.getAttribute('type')) || undefined,
+    disabled: !!el.disabled || safe(() => el.getAttribute('aria-disabled')) === 'true',
+    visible: vis(el),
+    rect: safe(() => { const r = el.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }; }),
+    textLength: safe(() => norm(el.innerText || '').length, 0),
+  } : null);
+  const bound = (s, n) => { const t = String(s || ''); return t.length > n ? `${t.slice(0, n)}…[+${t.length - n}]` : t; };
+
+  const buttons = () => safe(() => [...document.querySelectorAll('button, [role="button"]')], []);
+  const labelOf = (el) => `${safe(() => el.getAttribute('aria-label'), '') || ''} ${safe(() => el.getAttribute('title'), '') || ''} ${safe(() => el.getAttribute('data-testid'), '') || ''}`.toLowerCase();
+  const looksStop = (el) => /stop/.test(labelOf(el));
+  const visibleStops = () => buttons().filter((b) => looksStop(b) && vis(b));
+  const bodyChars = () => safe(() => (document.body.innerText || '').length, 0);
+  const answerSel = cfg.answerSelector || '[data-testid="markdown-reply"]';
+  const answers = () => safe(() => [...document.querySelectorAll(answerSel)], []);
+
+  const out = {
+    kind: 'conversation-recording',
+    when: new Date().toISOString(),
+    // Origin and path only: the query string carries a session code.
+    url: safe(() => location.origin + location.pathname),
+    title: safe(() => document.title),
+    viewport: safe(() => ({ w: innerWidth, h: innerHeight })),
+    turns: [],
+  };
+  // Kept on the page as it grows, so a recording interrupted half way can
+  // still be collected rather than lost with the call that timed out.
+  const publish = () => { try { window.__copilotRecord = out; } catch { /* no window */ } };
+  publish();
+
+  // ---------------------------------------------------------------- input
+  const editable = safe(() => [...document.querySelectorAll('[contenteditable="true"], textarea, input[type="text"]')].filter(vis), []);
+  const input = safe(() => (cfg.inputSelector && document.querySelector(cfg.inputSelector)), null)
+    || editable.sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y)[0]
+    || null;
+  out.input = describe(input);
+  if (!input) { out.aborted = 'no input element found; nothing was sent'; publish(); return out; }
+
+  // The composer: the nearest ancestor that holds controls, which is where
+  // a send button would be.
+  let composer = input.parentElement;
+  for (let i = 0; composer && i < 5; i++, composer = composer.parentElement) {
+    if (safe(() => composer.querySelectorAll('button, [role="button"]').length, 0) > 0) break;
+  }
+  out.composer = describe(composer);
+  out.composerButtonsIdle = composer ? safe(() => [...composer.querySelectorAll('button, [role="button"]')].map(describe), []) : [];
+
+  // ---------------------------------------------- the page before we start
+  out.before = {
+    answerNodes: answers().length,
+    bodyChars: bodyChars(),
+    buttons: buttons().length,
+    stopLikeAll: buttons().filter(looksStop).map(describe),
+    stopLikeVisible: visibleStops().map(describe),
+  };
+
+  let mutations = 0;
+  let lastMutation = Date.now();
+  let obs = null;
+  try {
+    obs = new MutationObserver((m) => { mutations += m.length; lastMutation = Date.now(); });
+    obs.observe(document.body, { subtree: true, childList: true, characterData: true });
+  } catch { /* counts stay at zero */ }
+
+  const idleStart = bodyChars();
+  const m0 = mutations;
+  await sleep(3000);
+  out.idle = { seconds: 3, mutations: mutations - m0, charGrowth: bodyChars() - idleStart };
+  publish();
+
+  /**
+   * Wait until the page is doing nothing: no visible stop control for a
+   * while, and no text arriving. Returns false rather than proceeding if it
+   * never gets there — sending into a working page is the one thing this
+   * must not do.
+   */
+  const waitIdle = async (maxMs) => {
+    const started = Date.now();
+    let lastChars = bodyChars();
+    let lastGrowth = Date.now();
+    let stopGoneSince = visibleStops().length ? null : Date.now();
+    while (Date.now() - started < maxMs) {
+      await sleep(250);
+      const c = bodyChars();
+      if (c - lastChars >= 20) lastGrowth = Date.now();
+      lastChars = c;
+      if (visibleStops().length) stopGoneSince = null;
+      else if (stopGoneSince === null) stopGoneSince = Date.now();
+      const quietFor = Date.now() - lastGrowth;
+      if (stopGoneSince !== null && Date.now() - stopGoneSince >= 1500 && quietFor >= 2000) {
+        return { idle: true, waitedMs: Date.now() - started };
+      }
+    }
+    return { idle: false, waitedMs: Date.now() - started };
+  };
+
+  const clearComposer = () => {
+    try {
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      sel.addRange(range);
+      document.execCommand('delete', false);
+    } catch { /* the direct removal below is the fallback */ }
+    if (safe(() => (input.innerText || '').length, 0) > 0 && input.isContentEditable) {
+      try { input.textContent = ''; } catch { /* nothing else to try */ }
+    }
+  };
+  const composerHolds = () => safe(() => String(input.value !== undefined && input.value !== null ? input.value : (input.innerText || '')), '');
+  // Zero-width characters are not whitespace, so they survive trimming.
+  const visibleLength = (s) => String(s || '').replace(/[​-‍⁠﻿\s]/g, '').length;
+
+  /**
+   * The page's echo of our message: the deepest element carrying the marker,
+   * outside the composer, widened only while the widening adds almost
+   * nothing — so it cannot swallow neighbouring messages.
+   */
+  const findEcho = (nonce, typedLength) => {
+    // Walked by hand rather than selected with 'body *'. The selector is
+    // fine in a browser, but it left this search unexercised by the checks
+    // that run before the recording is used, and this is used once.
+    const all = [];
+    const walk = (el, depth) => {
+      if (!el || depth > 40) return;
+      for (const c of (el.children || [])) { all.push(c); walk(c, depth + 1); }
+    };
+    safe(() => walk(document.body, 0));
+    let best = null;
+    for (const el of all) {
+      if (composer && composer.contains(el)) continue;
+      const t = safe(() => el.innerText || '', '');
+      if (!t.includes(nonce)) continue;
+      if (!best || (best.contains(el) && el !== best)) best = el;
+    }
+    if (!best) return null;
+    // Widen only across wrappers that add almost nothing. The first version
+    // widened while the parent stayed under a size limit — and a short
+    // earlier conversation fits under any such limit, so it climbed into
+    // the container holding the user's previous messages and recorded them.
+    // A wrapper around one message adds a few characters at most; a
+    // container of messages adds whole messages.
+    void typedLength;
+    for (let up = best.parentElement, i = 0; up && i < 4; up = up.parentElement, i++) {
+      if (composer && up.contains(composer)) break;
+      const grows = safe(() => (up.innerText || '').length, Infinity) - safe(() => (best.innerText || '').length, 0);
+      if (grows > 40) break;
+      best = up;
+    }
+    return best;
+  };
+
+  // ---------------------------------------------------------------- turns
+  const perTurnMs = Number(cfg.perTurnMs || 90000);
+  const idleMaxMs = Number(cfg.idleMaxMs || 90000);
+
+  for (let n = 0; n < (cfg.turns || []).length; n++) {
+    const { prompt, nonce } = cfg.turns[n];
+    const turn = { index: n + 1, nonce, typed: prompt, typedLength: prompt.length, timeline: [] };
+    out.turns.push(turn);
+    const t0 = Date.now();
+    const mark = (what, extra) => turn.timeline.push({ atMs: Date.now() - t0, what, ...(extra || {}) });
+
+    const idle = await waitIdle(idleMaxMs);
+    turn.idleBefore = idle;
+    if (!idle.idle) {
+      turn.skipped = 'the page never went idle, so nothing was sent';
+      publish();
+      break;
+    }
+
+    input.focus();
+    clearComposer();
+    await sleep(150);
+    const leftover = composerHolds();
+    turn.composerAfterClear = { length: leftover.length, visibleLength: visibleLength(leftover) };
+    if (visibleLength(leftover) > 0) {
+      // Something of the user's may be in the box. Do not read it, and do
+      // not type on top of it: that would send it.
+      turn.skipped = 'the composer could not be emptied, so nothing was typed or sent';
+      publish();
+      break;
+    }
+
+    try { document.execCommand('insertText', false, prompt); } catch (e) { turn.insertError = String(e && e.message); }
+    await sleep(250);
+    const held = composerHolds();
+    turn.composerHeld = {
+      text: bound(held, 60000),
+      length: held.length,
+      textContent: bound(safe(() => input.textContent, ''), 60000),
+      html: bound(safe(() => input.innerHTML, ''), 60000),
+    };
+    turn.composerButtonsTyped = composer ? safe(() => [...composer.querySelectorAll('button, [role="button"]')].map(describe), []) : [];
+    mark('typed', { held: held.length });
+
+    const baseline = new Set(answers());
+    const baseChars = bodyChars();
+    const stopsBefore = visibleStops().length;
+
+    // One submission. keypress only if the page did not take the keydown,
+    // as a browser would; no button, no retry.
+    const key = (type) => new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
+    const taken = safe(() => !input.dispatchEvent(key('keydown')), null);
+    if (taken === false) safe(() => input.dispatchEvent(key('keypress')));
+    safe(() => input.dispatchEvent(key('keyup')));
+    turn.enterConsumed = taken;
+    mark('enter');
+
+    let clearedAt = null; let stopAt = null; let stopGoneAt = null; let answerAt = null; let echoAt = null;
+    let lastChars = baseChars; let lastGrowthAt = Date.now();
+    let stopSeen = null;
+    while (Date.now() - t0 < perTurnMs) {
+      await sleep(250);
+      const now = Date.now() - t0;
+      if (clearedAt === null && visibleLength(composerHolds()) === 0) { clearedAt = now; mark('composer cleared'); }
+      const stops = visibleStops();
+      if (stopAt === null && stops.length > stopsBefore) {
+        stopAt = now;
+        stopSeen = stops.map(describe);
+        mark('stop control appeared', { count: stops.length });
+      }
+      if (stopAt !== null && stopGoneAt === null && stops.length <= stopsBefore) { stopGoneAt = now; mark('stop control gone'); }
+      const fresh = answers().filter((a) => !baseline.has(a));
+      if (answerAt === null && fresh.length) { answerAt = now; mark('answer node appeared'); }
+      if (echoAt === null && findEcho(nonce, prompt.length)) { echoAt = now; mark('echo found'); }
+      const c = bodyChars();
+      if (c - lastChars >= 20) { mark('text grew', { by: c - lastChars }); lastGrowthAt = Date.now(); }
+      lastChars = c;
+
+      // Never registered: no clearing, no stop control, no echo, no answer.
+      if (now > Number(cfg.registerMs || 15000) && clearedAt === null && stopAt === null && echoAt === null && answerAt === null) {
+        turn.sendNotRegistered = true;
+        mark('send did not register');
+        break;
+      }
+      // Settled: an answer exists, any stop control has gone, nothing new.
+      if (answerAt !== null && (stopAt === null || stopGoneAt !== null) && Date.now() - lastGrowthAt >= 3000) {
+        mark('settled');
+        break;
+      }
+    }
+
+    Object.assign(turn, {
+      composerClearedAt: clearedAt, stopAppearedAt: stopAt, stopGoneAt, answerAppearedAt: answerAt, echoFoundAt: echoAt,
+      stopControl: stopSeen,
+      totalMs: Date.now() - t0,
+      charsGained: bodyChars() - baseChars,
+    });
+
+    const echo = findEcho(nonce, prompt.length);
+    turn.echo = echo ? {
+      describe: describe(echo),
+      text: bound(safe(() => echo.innerText, ''), 60000),
+      textContent: bound(safe(() => echo.textContent, ''), 60000),
+      html: bound(safe(() => echo.innerHTML, ''), 60000),
+    } : null;
+
+    const fresh = answers().filter((a) => !baseline.has(a));
+    const ans = fresh[fresh.length - 1] || null;
+    if (ans) {
+      // The reply's own container, for its chrome — but only if it holds
+      // this reply and nothing else. Falling back to the parent element could
+      // land on a list of every message in the chat.
+      let container = safe(() => ans.closest('[data-testid="lastChatMessage"], [id^="response-id"]'), null) || ans.parentElement;
+      const extra = safe(() => (container.innerText || '').length, Infinity) - safe(() => (ans.innerText || '').length, 0);
+      if (!container || extra > 200 || [...baseline].some((b) => safe(() => container.contains(b), false))) container = ans;
+      turn.answer = {
+        newAnswerNodes: fresh.length,
+        describe: describe(ans),
+        text: bound(safe(() => ans.innerText, ''), 60000),
+        textContent: bound(safe(() => ans.textContent, ''), 60000),
+        html: bound(safe(() => ans.innerHTML, ''), 60000),
+        container: describe(container),
+        containerHtml: bound(safe(() => container.innerHTML, ''), 80000),
+      };
+    } else {
+      turn.answer = null;
+    }
+    publish();
+    if (turn.sendNotRegistered) break;
+  }
+
+  try { if (obs) obs.disconnect(); } catch { /* ignore */ }
+  out.finished = new Date().toISOString();
+  publish();
+  return out;
+}

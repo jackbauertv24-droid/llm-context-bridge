@@ -63,6 +63,23 @@ export class El {
   set textContent(v) { this.children = []; this._text = v; }
   get value() { return undefined; }
 
+  /**
+   * Serialised markup, as a browser would give it. Without this the
+   * recorder's HTML capture ran against undefined and was never tested at
+   * all — and the HTML of a reply is how code-block chrome is understood.
+   */
+  get innerHTML() {
+    const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if (!this.children.length) return esc(this._text || '');
+    return this.children.map((c) => c.outerHTML).join('');
+  }
+
+  get outerHTML() {
+    const tag = this.tagName.toLowerCase();
+    const attrs = Object.entries(this.attrs).map(([k, v]) => ` ${k}="${String(v).replace(/"/g, '&quot;')}"`).join('');
+    return `<${tag}${attrs}>${this.innerHTML}</${tag}>`;
+  }
+
   get isConnected() { let e = this; while (e.parentElement) e = e.parentElement; return e === document.body; }
 
   get firstChild() { return this.children[0] || null; }
