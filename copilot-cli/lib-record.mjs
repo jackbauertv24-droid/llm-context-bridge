@@ -438,18 +438,51 @@ export async function recordConversation(cfg) {
     return { idle: false, waitedMs: Date.now() - started };
   };
 
-  const clearComposer = () => {
-    try {
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      const range = document.createRange();
-      range.selectNodeContents(input);
-      sel.addRange(range);
-      document.execCommand('delete', false);
-    } catch { /* the direct removal below is the fallback */ }
-    if (safe(() => (input.innerText || '').length, 0) > 0 && input.isContentEditable) {
-      try { input.textContent = ''; } catch { /* nothing else to try */ }
+  /**
+   * Empty the box, trying each method until one works, and say which.
+   *
+   * RECORDED (2026-09-23): on the real page, selecting the contents and
+   * deleting in the same instant leaves every character in place, and so
+   * does setting textContent — the editor keeps its own copy of the text and
+   * puts it back. Editors of this kind learn of a selection change only from
+   * the selectionchange event, which arrives a moment later, so the methods
+   * here pause between selecting and deleting. None of them can send
+   * anything: they select and delete inside the box, and nothing else.
+   */
+  const selectContents = (collapseToEnd) => {
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    const range = document.createRange();
+    range.selectNodeContents(input);
+    if (collapseToEnd) range.collapse(false);
+    sel.addRange(range);
+  };
+  const clearComposer = async () => {
+    const report = { before: visibleLength(composerHolds()), tried: [] };
+    if (report.before === 0) { report.cleared = true; return report; }
+    const methods = [
+      ['select, pause, delete', async () => { selectContents(false); await sleep(150); document.execCommand('delete', false); }],
+      ['selectAll, pause, delete', async () => { document.execCommand('selectAll', false); await sleep(150); document.execCommand('delete', false); }],
+      ['caret at end, backspace repeatedly', async () => {
+        selectContents(true);
+        await sleep(150);
+        const most = Math.min(composerHolds().length + 10, 800);
+        for (let i = 0; i < most && visibleLength(composerHolds()) > 0; i++) {
+          document.execCommand('delete', false);
+          if (i % 25 === 24) await sleep(10);
+        }
+      }],
+    ];
+    for (const [how, run] of methods) {
+      safe(() => input.focus());
+      try { await run(); } catch (e) { report.tried.push({ how, error: String(e && e.message) }); continue; }
+      await sleep(300);
+      const after = visibleLength(composerHolds());
+      report.tried.push({ how, after });
+      if (after === 0) { report.cleared = true; report.by = how; return report; }
     }
+    report.cleared = false;
+    return report;
   };
   const composerHolds = () => safe(() => String(input.value !== undefined && input.value !== null ? input.value : (input.innerText || '')), '');
   // Zero-width characters are not whitespace, so they survive trimming.
@@ -497,46 +530,11 @@ export async function recordConversation(cfg) {
     return best;
   };
 
-  // ------------------------------------------------------------ clearing
-  // A fresh chat's box is already empty, so a recording that only sends
-  // would never show whether clearing works — and the bridge clears before
-  // every message. Type our own words, clear, and measure each method.
-  if (cfg.clearTest !== false) {
-    const idle = await waitIdle(Number(cfg.idleMaxMs || 90000));
-    const test = { idle: idle.idle };
-    if (idle.idle && visibleLength(composerHolds()) === 0) {
-      const words = `clear-test ${cfg.clearNonce || 'probe'}`;
-      input.focus();
-      try { document.execCommand('insertText', false, words); } catch (e) { test.insertError = String(e && e.message); }
-      await sleep(200);
-      test.afterInsert = visibleLength(composerHolds());
-      try {
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        const range = document.createRange();
-        range.selectNodeContents(input);
-        sel.addRange(range);
-        document.execCommand('delete', false);
-      } catch (e) { test.deleteError = String(e && e.message); }
-      await sleep(200);
-      test.afterExecCommandDelete = visibleLength(composerHolds());
-      if (test.afterExecCommandDelete > 0) {
-        try { input.textContent = ''; } catch { /* recorded below */ }
-        await sleep(200);
-        test.afterTextContentFallback = visibleLength(composerHolds());
-      }
-      test.clearedBy = test.afterExecCommandDelete === 0 ? 'execCommand delete'
-        : test.afterTextContentFallback === 0 ? 'textContent fallback' : 'neither';
-    } else {
-      test.skipped = idle.idle ? 'the box was not empty to begin with, so it was left alone' : 'the page was not idle';
-    }
-    out.clearTest = test;
-    publish();
-  }
-
   // ---------------------------------------------------------------- turns
   const perTurnMs = Number(cfg.perTurnMs || 90000);
   const idleMaxMs = Number(cfg.idleMaxMs || 90000);
+  // Our own text, typed by the previous probe, that did not send.
+  let ownUnsent = null;
 
   for (let n = 0; n < (cfg.turns || []).length; n++) {
     const { prompt, nonce, label, method = 'enter', tolerant = false } = cfg.turns[n];
@@ -554,20 +552,34 @@ export async function recordConversation(cfg) {
     }
 
     input.focus();
-    clearComposer();
-    await sleep(150);
-    const leftover = composerHolds();
-    turn.composerAfterClear = { length: leftover.length, visibleLength: visibleLength(leftover) };
-    if (visibleLength(leftover) > 0) {
-      // Something of the user's may be in the box. Do not read it, and do
-      // not type on top of it: that would send it.
-      turn.skipped = 'the composer could not be emptied, so nothing was typed or sent';
-      publish();
-      break;
+    let reuse = false;
+    if (ownUnsent && method === 'button' && visibleLength(composerHolds()) > 0) {
+      // The previous probe's text did not send and could not be cleared. It
+      // is ours, typed a moment ago, so the button probe sends it rather
+      // than being lost to a box nobody can empty.
+      reuse = true;
+      turn.reusedPreviousText = ownUnsent.nonce;
+      turn.nonce = ownUnsent.nonce;
+      turn.typed = ownUnsent.typed;
+      turn.typedLength = ownUnsent.typed.length;
+    } else {
+      turn.clearing = await clearComposer();
+      const leftover = composerHolds();
+      turn.composerAfterClear = { length: leftover.length, visibleLength: visibleLength(leftover) };
+      if (visibleLength(leftover) > 0) {
+        // Something of the user's may be in the box. Do not read it, and do
+        // not type on top of it: that would send it.
+        turn.skipped = 'the composer could not be emptied, so nothing was typed or sent';
+        publish();
+        break;
+      }
     }
+    ownUnsent = null;
 
     const insertStarted = Date.now();
-    try { document.execCommand('insertText', false, prompt); } catch (e) { turn.insertError = String(e && e.message); }
+    if (!reuse) {
+      try { document.execCommand('insertText', false, prompt); } catch (e) { turn.insertError = String(e && e.message); }
+    }
     turn.insertMs = Date.now() - insertStarted;
     await sleep(250);
     const held = composerHolds();
@@ -744,12 +756,41 @@ export async function recordConversation(cfg) {
       // A fallback that did not send tells us something, and nothing was
       // sent, so the box is cleared of our own words and the next turn goes
       // ahead.
-      clearComposer();
-      await sleep(500);
-      turn.clearedAfterNoSend = visibleLength(composerHolds()) === 0;
-      if (!turn.clearedAfterNoSend) { turn.stoppedHere = 'our own text could not be cleared, so nothing further was typed'; publish(); break; }
+      turn.clearing = await clearComposer();
+      turn.clearedAfterNoSend = turn.clearing.cleared;
+      if (!turn.clearedAfterNoSend) {
+        ownUnsent = { nonce: turn.nonce, typed: turn.typed };
+        publish();
+      }
     }
   }
+
+  // ------------------------------------------------------------ clearing
+  // Last, so that however it goes, it cannot stand in the way of a send.
+  // A fresh chat's box is already empty, so without this a recording never
+  // shows whether clearing works — and the bridge clears when a send goes
+  // wrong. Type our own words, then try each method.
+  if (cfg.clearTest && !out.turns.some((t) => t.skipped)) {
+    const idle = await waitIdle(idleMaxMs);
+    const test = { idle: idle.idle };
+    if (!idle.idle) test.skipped = 'the page was not idle';
+    else if (visibleLength(composerHolds()) > 0) test.skipped = 'the box already held text, so nothing was added to it';
+    else {
+      safe(() => input.focus());
+      try { document.execCommand('insertText', false, `clear-test ${cfg.clearNonce || 'probe'}`); } catch (e) { test.insertError = String(e && e.message); }
+      await sleep(250);
+      test.afterInsert = visibleLength(composerHolds());
+      Object.assign(test, await clearComposer());
+    }
+    out.clearTest = test;
+  }
+
+  // Whatever is left in the box now is ours; say so, so the caller can try
+  // the one method that works from outside the page, or ask for it by hand.
+  // A turn that stopped because the box would not empty may have met text
+  // that was never ours; that is never touched from outside.
+  const metForeignText = out.turns.some((t) => t.skipped && t.composerAfterClear && t.composerAfterClear.visibleLength > 0 && !t.reusedPreviousText);
+  out.leftInBox = { visible: visibleLength(composerHolds()), ours: !metForeignText };
 
   try { if (obs) obs.disconnect(); } catch { /* ignore */ }
   out.finished = new Date().toISOString();

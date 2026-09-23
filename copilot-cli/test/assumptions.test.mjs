@@ -18,11 +18,11 @@ const here = import.meta.dirname;
 const pageFn = fs.readFileSync(path.join(here, '..', 'page-fn.mjs'), 'utf8');
 const record = JSON.parse(fs.readFileSync(path.join(here, 'fixtures', 'copilot-web-2026-09-22.json'), 'utf8'));
 
-test('every way of refusing to send is one of the four justified ones', () => {
+test('every way of refusing to send is one of the justified ones', () => {
   // Each `notSent: true` in the page function must carry a via: that is on
   // the list, so a new refusal cannot be added without appearing here.
   const reasons = [...pageFn.matchAll(/via: '(not-sent-[a-z-]+)'/g)].map((m) => m[1]);
-  const allowed = ['not-sent-page-busy', 'not-sent-bad-composer'];
+  const allowed = ['not-sent-page-busy', 'not-sent-bad-composer', 'not-sent-box-not-empty'];
   for (const r of reasons) {
     assert.ok(allowed.includes(r), `a new refusal "${r}" was added without being justified in ASSUMPTIONS.md`);
   }

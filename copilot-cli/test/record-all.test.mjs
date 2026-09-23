@@ -81,10 +81,10 @@ test('the whole command runs, sends each message once and writes the bundle', as
       config: CONFIG,
       version: 'test',
     });
-    // This page sends on any Enter, Ctrl or not, and its Send button does
-    // nothing: seven by the keyboard, the bridge's turn, and the long one.
-    assert.equal(state.submits, 8, 'one per message that registers, never a repeat');
-    assert.equal(bundle.stages.conversation.turns.length, 7);
+    // Five by Enter, the bridge's turn, and the long one.
+    assert.equal(state.submits, 7, 'one per message, never a repeat');
+    assert.equal(bundle.stages.conversation.turns.length, 5, 'the five plain turns; the fallbacks are recorded separately');
+    assert.equal(bundle.stages.fallbacks, null, 'no probe that could leave text in the box');
     assert.deepEqual(bundle.stages.analysis.turns[0].answer.bridgeParses, ['list'], 'the real parser reads the real-shaped reply');
     assert.equal(bundle.stages.confluence, undefined, 'mail and Confluence are not part of this recording');
     assert.equal(bundle.stages.mail, undefined);

@@ -42,10 +42,11 @@ Evidence has three strengths:
 | 13 | There is no `MessageListContainer` or `role=feed` on this page | RECORDED — `conversationRegion: null` | recording | no |
 | 14 | A control labelled "Task Hub" is not a send button | RECORDED — `sendLike` listed it | recording | no |
 | 15 | Sending repeatedly can get the account throttled or banned | OBSERVED — the user reported throttling after duplicate sends | symptom | **yes** — the send budget and backoff |
+| 16 | Selecting the box's contents and deleting at once, or writing `textContent`, empties it | **RECORDED FALSE** — `clearTest`: 15 characters typed, 15 after each (2026-09-23) | recording | **yes** — since clearing does not work, the bridge refuses to type into a box that still shows text, which would otherwise be sent with the prompt |
 
 ## What blocks, and what each blocking check rests on
 
-There are exactly four ways a message is not sent. Every one is RECORDED or
+There are exactly five ways a message is not sent. Every one is RECORDED or
 trivially true:
 
 1. **The page is generating** — assumptions 4 and 5, both recorded. A visible
@@ -53,6 +54,10 @@ trivially true:
 2. **The composer is empty** — assumption 10.
 3. **The text plainly arrived twice** — assumption 9, from a symptom with one
    explanation.
+5. **The box still shows text after clearing** — assumption 16, recorded:
+   typing would put the prompt after it and send both. An empty box reads
+   as zero visible characters on the real page, so this never meets an
+   ordinary send.
 4. **The send budget for the run is spent** — assumption 15, and the harm of
    being wrong here is far smaller than the harm of being wrong the other way.
 

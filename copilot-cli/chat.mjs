@@ -708,6 +708,14 @@ async function runRecordAll(cdp) {
   const { runRecordAllWith } = await import('./lib-record-run.mjs');
   await runRecordAllWith({
     evalFn: (fn, arg, opts) => cdp.evalFn(fn, arg, opts),
+    // Real key presses, used only to select-all and delete our own probe
+    // text; never Enter.
+    keysFn: async (events) => {
+      for (const ev of events) {
+        if (ev.key === 'Enter') throw new Error('refusing to press Enter through the key channel');
+        await cdp.send('Input.dispatchKeyEvent', ev);
+      }
+    },
     note,
     write: (file, text) => fs.writeFileSync(file, text),
     registry,

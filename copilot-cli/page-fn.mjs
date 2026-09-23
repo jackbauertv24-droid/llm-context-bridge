@@ -252,6 +252,25 @@ export async function askInPage(cfg) {
 
   if (input.isContentEditable) {
     clearComposer();
+    await sleep(150);
+    // RECORDED (2026-09-23): clearComposer does not empty this page's box —
+    // 15 characters typed, 15 left after it. Whatever is left would be sent
+    // along with the prompt, since typing inserts at the caret. An empty box
+    // reads as zero visible characters on the real page (the same recording
+    // began by checking exactly that), so this cannot stop an ordinary send.
+    const leftover = visibleText(input.innerText).length;
+    if (leftover > 0) {
+      log(`the box still holds ${leftover} characters after clearing; not typing on top of them`);
+      debug.wait = { via: 'not-sent-box-not-empty', sawStop: false, ms: 0, submissions: 0 };
+      return {
+        ok: true,
+        notSent: true,
+        text: '',
+        method: `not sent: the Copilot box already holds ${leftover} characters that could not be cleared. `
+          + 'Delete them in Chrome, then run this again.',
+        debug,
+      };
+    }
     // Insert the prompt exactly once.
     //
     // A synthetic beforeinput carrying the text used to be dispatched here

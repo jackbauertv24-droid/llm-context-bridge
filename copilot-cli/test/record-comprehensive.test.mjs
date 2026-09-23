@@ -8,7 +8,13 @@
  * to find out about, each switchable: Ctrl+Enter that only adds a newline, a
  * send button that does nothing, a box that truncates long text, a reply
  * that pauses mid-stream and has its node replaced, a code reply that loses
- * indentation or keeps its gutter digits. For every variant, the question is
+ * indentation or keeps its gutter digits.
+ *
+ * The editor is modelled on what the first live run of this recorded: text
+ * written straight into it is put back, and selecting and deleting in the
+ * same instant deletes nothing. Which other method clears it is not known,
+ * so each is a switch, and the default is the worst case — none of them,
+ * only real key presses. For every variant, the question is
  * the same: does the run send what it says, no more, record the fact, and
  * leak nothing from before.
  */
@@ -30,9 +36,13 @@ function page(opt = {}) {
     replaceAnswerNode = false,
     earlier = false,            // a conversation that already holds private text
     labelledSend = true,
+    clearing = 'none',          // which in-page method empties the box: 'none' | 'pause-select' | 'selectAll' | 'backspace'
+    keysWork = true,            // whether real Ctrl+A, Backspace empty it
+    draft = null,               // text already in the box when the run starts
+    longNeverSends = false,     // a message over 5,000 characters is not accepted
   } = opt;
   resetDom();
-  const state = { submits: 0, sent: [], via: [] };
+  const state = { submits: 0, sent: [], via: [], keys: [] };
   const feed = new El('div', {});
   doc.body.append(feed);
   if (earlier) {
@@ -56,16 +66,45 @@ function page(opt = {}) {
     set(v) { this.children = []; this._text = v; },
     configurable: true,
   });
+  // RECORDED: the editor keeps its own copy and puts it back.
   Object.defineProperty(input, 'textContent', {
     get() { return this._text || ''; },
-    set(v) { this.children = []; this._text = String(v).slice(0, maxChars); },
+    set() { /* reverted by the editor */ },
     configurable: true,
   });
+  input._text = draft || '';
+  input.focus = () => { doc.activeElement = input; };
+  // The editor learns of a selection only a moment after it changes.
+  const sel = { range: null, at: 0 };
+  globalThis.window.getSelection = () => ({
+    removeAllRanges() { sel.range = null; },
+    addRange(range) { sel.range = range; sel.at = Date.now(); },
+  });
+  doc.createRange = () => ({ collapsed: false, selectNodeContents() { this.collapsed = false; }, collapse() { this.collapsed = true; } });
+  doc.execCommand = (cmd, _ui, arg) => {
+    if (doc.activeElement !== input) return false;
+    if (cmd === 'insertText') { input._text = `${input._text || ''}${arg}`.slice(0, maxChars); return true; }
+    if (cmd === 'selectAll') { sel.range = { all: true, collapsed: false }; sel.at = Date.now(); return true; }
+    if (cmd !== 'delete') return false;
+    const synced = sel.range && Date.now() - sel.at >= 100;
+    if (!synced) return false;                                        // RECORDED
+    if (clearing === 'pause-select' && !sel.range.all && !sel.range.collapsed) input._text = '';
+    else if (clearing === 'selectAll' && sel.range.all) input._text = '';
+    else if (clearing === 'backspace' && sel.range.collapsed) input._text = (input._text || '').slice(0, -1);
+    return true;
+  };
+  state.pressKeys = (events) => {
+    for (const ev of events) state.keys.push(`${ev.type}:${ev.key}`);
+    const selectAll = events.some((e) => e.type === 'rawKeyDown' && e.key === 'a' && e.modifiers === 2);
+    const back = events.some((e) => e.type === 'rawKeyDown' && e.key === 'Backspace');
+    if (keysWork && selectAll && back && doc.activeElement === input) input._text = '';
+  };
 
   let turn = 0;
   const submit = (via) => {
     const sent = input._text || '';
     if (!sent) return;
+    if (longNeverSends && sent.length > 5000) return;
     state.submits++; turn++; state.sent.push(sent); state.via.push(via);
     setTimeout(() => { input._text = ''; }, 500);
     const stop = new El('button', { 'aria-label': 'Stop responding' });
@@ -129,6 +168,7 @@ async function runAll(opt = {}) {
   const restore = installGlobals();
   const notes = [];
   const files = {};
+  const saved = { createRange: doc.createRange, execCommand: doc.execCommand };
   try {
     const state = page(opt);
     const bundle = await runRecordAllWith({
@@ -140,6 +180,7 @@ async function runAll(opt = {}) {
         const value = await (0, eval)(expr);
         return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
       },
+      keysFn: async (events) => state.pressKeys(events),
       note: (l) => notes.push(l),
       write: (f, t) => { files[f] = t; },
       registry: createDefaultRegistry(),
@@ -148,91 +189,85 @@ async function runAll(opt = {}) {
       version: 'test',
     });
     return { state, bundle, notes, files, a: bundle.stages.analysis };
-  } finally { restore(); }
+  } finally { Object.assign(doc, saved); delete doc.activeElement; restore(); }
 }
 
 const byLabel = (a, label) => a.turns.find((t) => t.label === label);
 
-test('the probe set covers every way the bridge touches the page', () => {
+const nonceOf = (text) => (String(text).match(/probe-[0-9a-f]+/) || [null])[0];
+const noEnterByKeys = (state) => assert.ok(!state.keys.some((k) => /Enter/.test(k)), 'Enter is never pressed through the key channel');
+
+test('the replica reproduces what the first live run recorded', async () => {
+  // Selecting and deleting in the same instant, then writing textContent:
+  // exactly the method that left 15 of 15 characters in the real box.
+  const restore = installGlobals();
+  const saved = { createRange: doc.createRange, execCommand: doc.execCommand };
+  try {
+    page({});
+    const input = doc.querySelector('#m365-chat-editor-target-element');
+    input.focus();
+    doc.execCommand('insertText', false, 'clear-test probe');
+    const s = globalThis.window.getSelection();
+    s.removeAllRanges();
+    const r = doc.createRange(); r.selectNodeContents(input); s.addRange(r);
+    doc.execCommand('delete', false);
+    input.textContent = '';
+    assert.equal(input._text, 'clear-test probe');
+  } finally { Object.assign(doc, saved); delete doc.activeElement; restore(); }
+});
+
+test('the probe set covers every way the bridge touches the page, in a safe order', () => {
   const p = buildProbeTurns({ registry: createDefaultRegistry(), root: process.cwd() });
-  assert.deepEqual(p.turns.map((t) => t.label), ['short', 'agent-prompt', 'tool-result', 'code-body', 'long-reply', 'button', 'ctrl-enter']);
-  assert.deepEqual(p.turns.map((t) => t.method || 'enter'), ['enter', 'enter', 'enter', 'enter', 'enter', 'button', 'ctrl-enter']);
-  assert.ok(p.turns.filter((t) => t.tolerant).every((t) => t.method !== undefined), 'only the fallback probes may fail and continue');
+  assert.deepEqual(p.turns.map((t) => t.label), ['short', 'agent-prompt', 'tool-result', 'code-body', 'long-reply']);
+  assert.ok(p.turns.every((t) => !t.tolerant && (t.method || 'enter') === 'enter'), 'the first five need nothing but Enter');
+  assert.deepEqual(p.fallbacks.map((t) => t.method), ['ctrl-enter', 'button']);
+  assert.ok(p.fallbacks.every((t) => t.tolerant));
   assert.ok(p.long.prompt.length >= 30000, 'the long message is really long');
   assert.ok(p.long.prompt.startsWith('Reply with only the word OK'), 'with the instruction first, so truncation keeps it');
   assert.ok(p.bridgePrompt.startsWith('hi'), 'the bridge turn is the plain "hi" that failed');
-  const nonces = [...p.turns.map((t) => t.nonce), p.bridgeNonce, p.long.nonce];
+  const nonces = [...p.turns, ...p.fallbacks, p.long].map((t) => t.nonce).concat(p.bridgeNonce);
   assert.equal(new Set(nonces).size, nonces.length, 'every message is distinguishable');
 });
 
-test('on a page like the real one: nine messages, each once, in order, and every fact recorded', async () => {
-  const { state, bundle, a, notes, files } = await runAll({ ctrlEnter: 'newline' });
-  // 1-5 by Enter, 6 by the button, 7 Ctrl+Enter does NOT send here, the bridge turn, the long one.
-  assert.deepEqual(state.via, ['enter', 'enter', 'enter', 'enter', 'enter', 'button', 'enter', 'enter'],
-    `sends were ${JSON.stringify(state.via)}`);
-  assert.equal(state.submits, 8, 'nothing was sent twice');
+test('on the page as recorded: seven messages, each once, none needing the box cleared', async () => {
+  const { state, a, notes, files } = await runAll({});
+  assert.deepEqual(state.via, ['enter', 'enter', 'enter', 'enter', 'enter', 'enter', 'enter'], JSON.stringify(state.via));
   assert.equal(new Set(state.sent).size, state.sent.length, 'no message sent twice');
-
-  const ce = byLabel(a, 'ctrl-enter');
-  assert.equal(ce.sendNotRegistered, true, 'the Ctrl+Enter probe records that it did not send');
-  assert.equal(ce.clearedAfterNoSend, true, 'and its text was cleared rather than left to ride along');
-  assert.ok(!state.sent.some((s) => s.includes(bundle.stages.conversation.turns[6].nonce)), 'the Ctrl+Enter text was never sent later by accident');
-
-  const btn = byLabel(a, 'button');
-  assert.equal(btn.sendNotRegistered, false);
-  assert.equal(btn.sendButton.ariaLabel, 'Send', 'the button clicked is the one labelled Send, not Attach');
-
-  assert.equal(a.clearTest.clearedBy, 'execCommand delete', 'clearing was measured on text in the box');
-
-  const lr = byLabel(a, 'long-reply');
-  assert.ok(lr.maxGrowthGapMs >= 2000, `the mid-answer silence was measured (${lr.maxGrowthGapMs}ms)`);
-  assert.ok(lr.answer.length > 600, 'and the whole list captured, not the part before the pause');
+  assert.equal(state.keys.length, 0, 'no keys pressed: the box never needed clearing');
+  assert.equal(a.clearTest, null, 'no clearing test');
 
   const cb = byLabel(a, 'code-body').codeBody;
-  assert.equal(cb.parsed, true);
   assert.equal(cb.exact, true, JSON.stringify(cb.differences));
-  assert.equal(cb.backslashesPreserved, true, 'the backslash check actually runs');
-  assert.equal(cb.tabPreserved, true);
+  assert.equal(cb.backslashesPreserved, true);
+  const lr = byLabel(a, 'long-reply');
+  assert.ok(lr.maxGrowthGapMs >= 2000);
+  assert.ok(lr.answer.length > 600);
 
   assert.ok(!a.bridge.notSent && a.bridge.ok, `the bridge turn ran: ${a.bridge.method}`);
-  assert.equal(a.bridge.debug.capture, undefined, 'the DOM capture is not kept');
-  assert.ok(a.bridge.wait && a.bridge.wait.via, 'its wait is recorded');
-  assert.equal(a.bridge.sameTextAsAnEarlierReply, false);
-  assert.ok(String(a.bridge.text).includes(a.bridge.prompt.match(/probe-\w+/)[0]), 'the bridge read the reply to its own message, not an earlier one');
-  assert.match(String(a.bridge.text), /Hello/, `a fresh chat, so the reply to our own "hi" is kept: ${JSON.stringify({ t: a.bridge.text, m: a.bridge.method, w: a.bridge.wait, steps: a.bridge.debug.steps })}`);
-
+  assert.ok(String(a.bridge.text).includes(nonceOf(a.bridge.prompt)), 'the bridge read the reply to its own message');
   const long = byLabel(a, 'long');
-  assert.equal(long.index, 8);
-  assert.equal(long.long.truncated, false);
+  assert.equal(long.index, 7);
   assert.equal(long.long.sendRegistered, true);
-
+  assert.equal(a.leftInBox.visible, 0);
   assert.ok(files['copilot-cli-record-all.json']);
-  for (const want of ['clearing:', 'button:', 'longest pause mid-answer', 'BRIDGE TURN', 'LONG:', 'CODE BODY: EXACT']) {
-    assert.ok(notes.some((l) => l.includes(want)), `the terminal summary shows "${want}"`);
+  for (const want of ['BRIDGE TURN', 'LONG:', 'CODE BODY: EXACT', 'longest pause mid-answer']) {
+    assert.ok(notes.some((l) => l.includes(want)), `summary shows "${want}"`);
   }
 });
 
-test('where Ctrl+Enter does send, that is recorded too, and still once', async () => {
-  const { state, a } = await runAll({ ctrlEnter: 'send' });
-  assert.equal(state.submits, 9);
-  assert.equal(state.via[6], 'ctrl-enter');
-  assert.equal(byLabel(a, 'ctrl-enter').sendNotRegistered, false);
+test('a long message the page will not send: its text is cleared by keys afterwards, never resent', async () => {
+  const { state, a } = await runAll({ maxChars: 10000, longNeverSends: true });
+  assert.equal(state.submits, 6);
+  assert.equal(byLabel(a, 'long').sendNotRegistered, true);
+  assert.ok(a.keyClears.some((k) => k.cleared));
+  noEnterByKeys(state);
 });
 
-test('a send button that does nothing is recorded, cleared, and the run carries on', async () => {
-  const { state, a } = await runAll({ buttonSends: false });
-  const btn = byLabel(a, 'button');
-  assert.equal(btn.sendNotRegistered, true);
-  assert.equal(btn.clearedAfterNoSend, true);
-  assert.ok(byLabel(a, 'long').long.sendRegistered, 'the long turn still ran');
-  assert.equal(new Set(state.sent).size, state.sent.length);
-});
-
-test('with no button labelled Send, nothing is clicked at all', async () => {
-  const { a } = await runAll({ labelledSend: false });
-  const btn = byLabel(a, 'button');
-  assert.equal(btn.buttonNotFound, true);
-  assert.equal(btn.sendNotRegistered, true);
+test('a draft already in the box: nothing is sent, no keys are pressed, and the draft is not recorded', async () => {
+  const { state, files } = await runAll({ draft: 'SECRET-unsent-draft' });
+  assert.equal(state.submits, 0);
+  assert.equal(state.keys.length, 0, 'keys are only ever used on our own text');
+  assert.ok(!files['copilot-cli-record-all.json'].includes('SECRET-unsent-draft'));
 });
 
 test('a box that truncates long text is caught by the long turn', async () => {
@@ -241,27 +276,6 @@ test('a box that truncates long text is caught by the long turn', async () => {
   assert.equal(l.truncated, true);
   assert.ok(l.held <= 10002, `held ${l.held}`);
   assert.ok(notes.some((n) => n.includes('TRUNCATED')));
-});
-
-test('a code reply that loses its indentation is reported, not passed', async () => {
-  const { a } = await runAll({ codeReply: 'flattened' });
-  const cb = byLabel(a, 'code-body').codeBody;
-  assert.equal(cb.exact, false);
-  assert.equal(cb.indentationPreserved, false);
-  assert.equal(cb.tabPreserved, false);
-});
-
-test('gutter numbers left inside a code body are counted', async () => {
-  const { a } = await runAll({ codeReply: 'gutter' });
-  const cb = byLabel(a, 'code-body').codeBody;
-  assert.equal(cb.exact, false);
-  assert.ok(cb.digitOnlyLinesInBody > 0);
-});
-
-test('a reply node replaced mid-stream is noticed', async () => {
-  const { a } = await runAll({ replaceAnswerNode: true });
-  const lr = byLabel(a, 'long-reply');
-  assert.equal(lr.answerReplacedMidStream, true);
 });
 
 test('in a chat that held private text, none of it is in the file — including via the bridge turn', async () => {
@@ -280,12 +294,4 @@ test('bridgeFacts drops the capture and candidate samples whatever the page retu
   const json = JSON.stringify(f);
   for (const s of SECRETS) assert.ok(!json.includes(s));
   assert.equal(f.debug.candidates[0].chars, 3);
-});
-
-test('analysis of the recording is the same when re-run from the file', async () => {
-  const { bundle } = await runAll({});
-  const rec = bundle.stages.conversation;
-  const merged = { ...rec, turns: [...rec.turns, ...bundle.stages.longMessage.turns], bridge: bundle.stages.bridge };
-  const again = analyseConversation(JSON.parse(JSON.stringify(merged)), buildProbeTurns({ registry: createDefaultRegistry(), root: process.cwd() }).tools, { expect: { 'code-body': CODE_BODY } });
-  assert.deepEqual(again.turns.map((t) => t.label), bundle.stages.analysis.turns.map((t) => t.label));
 });

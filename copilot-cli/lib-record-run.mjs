@@ -51,10 +51,15 @@ export const CODE_BODY = [
  *   3  a real tool result       the second turn of every agent exchange
  *   4  a multi-line code reply  whether write and edit bodies survive the page
  *   5  a long streamed reply    pauses mid-answer, and whether the reply node is replaced
- *   6  sent by the send button the bridge's third attempt, never exercised
+ *   6  one real bridge turn    askInPage itself
  *   7  sent by Ctrl+Enter      the bridge's second attempt, never exercised
- *   -  one real bridge turn    askInPage itself, run separately after these
- *   8  a very long message     whether the box has a size limit, and where
+ *   8  sent by the send button the bridge's third attempt, never exercised
+ *   9  a very long message     whether the box has a size limit, and where
+ *
+ * 1 to 6 need no clearing: the page empties the box itself on every send.
+ * 7 and 8 may leave our text behind, and clearing it is exactly what the
+ * first run of this showed to be unreliable, so they come after everything
+ * that cannot be put at risk by it.
  */
 export function buildProbeTurns({ registry, root, longChars = 30000 }) {
   const nonce = () => `probe-${randomBytes(3).toString('hex')}`;
@@ -88,9 +93,14 @@ export function buildProbeTurns({ registry, root, longChars = 30000 }) {
       { label: 'tool-result', prompt: toolResult, nonce: n[2] },
       { label: 'code-body', prompt: codeRequest, nonce: n[3], expectBody: CODE_BODY },
       { label: 'long-reply', prompt: `Write a numbered list from 1 to 60, one short sentence about the number on each line. (${n[5]})`, nonce: n[5] },
-      { label: 'button', method: 'button', tolerant: true, prompt: `Reply with only the word OK. (${n[6]})`, nonce: n[6] },
-      { label: 'ctrl-enter', method: 'ctrl-enter', tolerant: true, prompt: `Reply with only the word OK. (${n[7]})`, nonce: n[7] },
     ],
+    // Ctrl+Enter first: if it only adds a line and the text cannot be
+    // cleared, the button probe sends that same text instead of being lost.
+    fallbacks: [
+      { label: 'ctrl-enter', method: 'ctrl-enter', tolerant: true, prompt: `Reply with only the word OK. (${n[7]})`, nonce: n[7] },
+      { label: 'button', method: 'button', tolerant: true, prompt: `Reply with only the word OK. (${n[6]})`, nonce: n[6] },
+    ],
+    clearNonce: n[4].replace('probe', 'clear'),
     bridgePrompt: `hi (${n[8]})`,
     bridgeNonce: n[8],
     long: { label: 'long', prompt: longMessage, nonce: n[4] },
@@ -103,10 +113,17 @@ export function summaryLines(a, rec) {
   if (rec.aborted) return [`[record-chat]      stopped before sending: ${rec.aborted}`];
   if (!a || a.error) return [`[record-chat]      recorded, but the analysis failed: ${a && a.error}`];
   out.push(`[record-chat]      idle page: ${a.idle.mutations} mutations, ${a.idle.charGrowth} characters over 3s`);
+  const clearing = (c) => (c.tried || []).map((t) => `${t.how} -> ${t.error ? `error ${t.error}` : t.after}`).join('; ');
   if (a.clearTest) {
     const c = a.clearTest;
-    out.push(c.skipped ? `[record-chat]      clearing: not tested — ${c.skipped}`
-      : `[record-chat]      clearing: ${c.clearedBy} (typed ${c.afterInsert}, after delete ${c.afterExecCommandDelete}${c.afterTextContentFallback !== undefined ? `, after fallback ${c.afterTextContentFallback}` : ''})`);
+    out.push(c.skipped ? `[record-chat]      clearing test: not run — ${c.skipped}`
+      : `[record-chat]      clearing test: ${c.cleared ? `cleared by "${c.by}"` : 'NOTHING in the page cleared it'} (typed ${c.afterInsert}; ${clearing(c)})`);
+  }
+  for (const k of rec.keyClears || []) {
+    out.push(`[record-chat]      real keys Ctrl+A, Backspace (${k.why}): ${k.skipped ? `not sent — ${k.skipped}` : `${k.before} -> ${k.after}${k.cleared ? ', CLEARED' : ', not cleared'}`}`);
+  }
+  if (rec.leftInBox && rec.leftInBox.visible > 0) {
+    out.push(`[record-chat]      !! the Copilot box still holds ${rec.leftInBox.visible} characters of probe text: delete it by hand`);
   }
   for (const t of a.turns) {
     out.push(`[record-chat]      turn ${t.index} (${t.label || '?'}, by ${t.method})${t.skipped ? `: SKIPPED — ${t.skipped}` : ''}${t.sendNotRegistered ? ': the send did not register' : ''}`);
@@ -114,7 +131,8 @@ export function summaryLines(a, rec) {
     if (t.composer) out.push(`        composer: ${t.composer.verdict} (typed ${t.composer.typedLength}, held ${t.composer.heldLength}, zero-width ${t.composer.zeroWidth})`);
     out.push(`        echo:     ${t.echo.found ? `found, newlines ${t.echo.newlinesInEcho}/${t.echo.newlinesTyped}, matches with spaces ${t.echo.matchesWithSpaces}, squashed ${t.echo.matchesSquashed}` : 'not found'}`);
     if (t.method === 'button') out.push(`        button:   ${t.buttonNotFound ? 'no labelled send button was found; nothing clicked' : `clicked aria="${(t.sendButton && t.sendButton.ariaLabel) || ''}"`}`);
-    if (t.sendNotRegistered && t.clearedAfterNoSend !== undefined) out.push(`        our text cleared afterwards: ${t.clearedAfterNoSend}`);
+    if (t.reusedPreviousText) out.push(`        sent the previous probe's text, which could not be cleared (${t.reusedPreviousText})`);
+    if (t.clearing && t.clearing.tried.length) out.push(`        clearing: ${t.clearing.cleared ? `cleared by "${t.clearing.by}"` : 'not cleared'} (${clearing(t.clearing)})`);
     out.push(`        timing:   cleared ${t.timing.composerClearedAt}, stop ${t.timing.stopAppearedAt}–${t.timing.stopGoneAt}, answer ${t.timing.answerAppearedAt}, total ${t.timing.totalMs}; longest pause mid-answer ${t.maxGrowthGapMs}ms; insert ${t.insertMs}ms${t.answerReplacedMidStream ? '; ANSWER NODE REPLACED' : ''}`);
     out.push(`        stop:     ${t.stopControl.length ? t.stopControl.map((s) => `aria="${s.ariaLabel || ''}" testid="${s.testid || ''}"`).join('; ') : 'none appeared'}`);
     if (t.answer.found) {
@@ -151,21 +169,61 @@ export function summaryLines(a, rec) {
  * @param deps.note          (line) => void
  * @param deps.write         (file, text) => void
  */
+/** Put focus in the chat box and report how much it holds. Runs in the tab. */
+export function focusComposer(cfg) {
+  const input = document.querySelector(cfg.inputSelector);
+  if (!input) return { found: false };
+  try { input.focus(); } catch { /* reported below */ }
+  const active = document.activeElement;
+  const visible = String(input.innerText || '').replace(/[\u200B-\u200D\u2060\uFEFF\s]/g, '').length;
+  return { found: true, focused: !!active && (active === input || input.contains(active)), visible };
+}
+
+/** Type our own words into an empty box, for the key-clearing test. Runs in the tab. */
+export function typeIntoEmptyComposer(cfg) {
+  const input = document.querySelector(cfg.inputSelector);
+  if (!input) return { typed: false, why: 'no input' };
+  const visible = () => String(input.innerText || '').replace(/[\u200B-\u200D\u2060\uFEFF\s]/g, '').length;
+  if (visible() > 0) return { typed: false, why: 'the box was not empty' };
+  input.focus();
+  try { document.execCommand('insertText', false, cfg.words); } catch (e) { return { typed: false, why: String(e && e.message) }; }
+  return { typed: true, visible: visible() };
+}
+
+/**
+ * Ctrl+A then Backspace, as real key presses through the debugging
+ * protocol. Neither can send a message. The select-all editing command is
+ * named explicitly, because a raw Ctrl+A is not turned into one everywhere.
+ */
+export const CLEAR_KEYS = [
+  { type: 'rawKeyDown', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, commands: ['selectAll'] },
+  { type: 'keyUp', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65 },
+  { type: 'rawKeyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 },
+  { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 },
+];
+
+/**
+ * @param deps.evalFn        (fn, arg, opts) => result — runs fn in the chat tab
+ * @param deps.keysFn        (events) => void — real key events into the tab; optional
+ * @param deps.note          (line) => void
+ * @param deps.write         (file, text) => void
+ */
 export async function runRecordAllWith(deps) {
-  const { evalFn, note, write, registry, root, config, version } = deps;
+  const { evalFn, keysFn, note, write, registry, root, config, version } = deps;
   const bundle = { version, node: process.version, started: new Date().toISOString(), stages: {} };
   const save = () => { try { write('copilot-cli-record-all.json', JSON.stringify(bundle, null, 1) + '\n'); } catch { /* reported by caller */ } };
 
   note('');
-  note('[record-chat] the chat page: at most nine messages, one at a time, each only after the page is idle');
+  note('[record-chat] the chat page: at most seven messages, one at a time, each only after the page is idle');
   note('[record-chat]   1 "hi"   2 the agent prompt   3 a tool result   4 a code block   5 a list of 60');
-  note('[record-chat]   6 "OK" by the send button   7 "OK" by Ctrl+Enter   8 "hi" through the bridge itself');
-  note('[record-chat]   9 a 30,000-character message');
-  note('[record-chat] 6 and 7 may not send; that is recorded, not retried. Expect about ten minutes.');
-  note('[record-chat] open a NEW Copilot chat first; nothing earlier is read either way.');
+  note('[record-chat]   6 "hi" through the bridge itself   7 a 30,000-character message');
+  note('[record-chat] none of these needs the box cleared: the page empties it on every send. About ten minutes.');
+  note('[record-chat] open a NEW Copilot chat first, with an EMPTY box; nothing earlier is read either way.');
   note('[record-chat] keep the Copilot tab in front and visible until this ends: Chrome slows the timers');
   note('[record-chat] of a hidden tab, which would distort every timing this records.');
-  const { turns, tools, bridgePrompt, long } = buildProbeTurns({ registry, root });
+  const { turns, fallbacks, tools, bridgePrompt, long, clearNonce } = buildProbeTurns({ registry, root });
+  const keyClears = [];
+  bundle.stages.keyClears = keyClears;
 
   const record = async (arg, timeoutMs) => {
     try {
@@ -175,43 +233,75 @@ export async function runRecordAllWith(deps) {
       try { return await evalFn(() => window.__copilotRecord || null, null, { timeoutMs: 20000 }); } catch { return null; }
     }
   };
+  // Only ever our own text, only ever select-all and delete.
+  const keyClear = async (why) => {
+    const k = { why };
+    keyClears.push(k);
+    if (!keysFn) { k.skipped = 'no key channel'; return k; }
+    let f;
+    try { f = await evalFn(focusComposer, { inputSelector: config.inputSelector }, { timeoutMs: 20000 }); } catch (e) { k.skipped = e.message; return k; }
+    k.before = f && f.visible;
+    if (!f || !f.found || !f.focused) { k.skipped = 'focus could not be put in the box, so no keys were sent'; return k; }
+    try { await keysFn(CLEAR_KEYS); } catch (e) { k.error = e.message; }
+    await new Promise((r) => setTimeout(r, 500));
+    try { k.after = (await evalFn(focusComposer, { inputSelector: config.inputSelector }, { timeoutMs: 20000 })).visible; } catch (e) { k.error = e.message; }
+    k.cleared = k.after === 0;
+    save();
+    return k;
+  };
+  const leftOurs = (r) => r && r.leftInBox && r.leftInBox.visible > 0 && r.leftInBox.ours;
+  const blocked = (r, n) => !r || r.aborted || (r.turns || []).length < n
+    || (r.turns || []).some((t) => t.skipped || t.stoppedHere || (t.sendNotRegistered && !t.tolerant));
 
   // Each turn can take up to perTurnMs plus idleMaxMs; allow for all of them.
   const perTurn = Number(config.perTurnMs || 90000) + Number(config.idleMaxMs || 90000) + 5000;
+
+  // 1-5: plain sends, none of which needs the box cleared.
   const rec = await record({ ...config, turns }, 60000 + perTurn * turns.length);
   bundle.stages.conversation = rec;
   save();
+  let stop = blocked(rec, turns.length) ? 'an earlier turn did not complete, so nothing further was sent' : null;
 
-  // A failure that is not one of the tolerated fallbacks means the page is in
-  // a state nobody has seen; nothing more is sent into it.
-  const hardStop = !rec || rec.aborted || (rec.turns || []).length < turns.length
-    || (rec.turns || []).some((t) => t.skipped || t.stoppedHere || (t.sendNotRegistered && !t.tolerant));
-
-  // The bridge's own turn: the function that failed, on the page it failed on.
+  // 6: the bridge's own turn — the function that failed, on the page it failed on.
   let bridge;
-  if (hardStop) bridge = { skipped: 'an earlier turn did not complete, so nothing further was sent' };
+  if (stop) bridge = { skipped: stop };
   else {
-    note('[record-chat]      the recorder turns are done; now one turn through the bridge itself');
+    note('[record-chat]      turns 1-5 are done; now one turn through the bridge itself');
     try {
       const res = await evalFn(askInPage, { ...config, prompt: bridgePrompt }, { timeoutMs: Number(config.answerTimeoutMs || 120000) + 60000 });
       bridge = { prompt: bridgePrompt, ...bridgeFacts(res, rec) };
     } catch (e) { bridge = { error: e.message }; }
+    if (bridge.error || bridge.notSent) stop = 'the bridge turn did not complete, so nothing further was sent';
   }
   bundle.stages.bridge = bridge;
   save();
 
-  // The long message last: it is the one most likely to be refused.
-  let longRec = null;
-  if (hardStop || !bridge || bridge.error || bridge.notSent) {
-    longRec = { turns: [{ index: turns.length + 1, label: 'long', skipped: 'not sent, because an earlier step did not complete' }] };
+  // The Ctrl+Enter and send-button probes and the clearing test are not
+  // run: each can leave text in the box, and the first live run recorded
+  // that nothing in the page clears it. They wait until clearing is solved.
+  const fb = null;
+  bundle.stages.fallbacks = fb;
+  save();
+
+  // 9: the long message last: it is the one most likely to be refused.
+  let longRec;
+  if (stop) {
+    longRec = { turns: [{ index: turns.length + 2, label: 'long', skipped: stop }] };
   } else {
-    longRec = await record({ ...config, turns: [long], clearTest: false }, 60000 + perTurn);
-    if (longRec && longRec.turns) longRec.turns.forEach((t) => { t.index = turns.length + 1; });
+    longRec = await record({ ...config, turns: [long] }, 60000 + perTurn);
+    if (longRec && longRec.turns) longRec.turns.forEach((t) => { t.index = turns.length + 2; });
+    if (leftOurs(longRec)) await keyClear('the long message did not send');
   }
   bundle.stages.longMessage = longRec;
   save();
 
-  const merged = rec ? { ...rec, turns: [...(rec.turns || []), ...((longRec && longRec.turns) || [])], bridge } : null;
+  let leftInBox = null;
+  try { const f = await evalFn(focusComposer, { inputSelector: config.inputSelector }, { timeoutMs: 20000 }); leftInBox = { visible: f.visible }; } catch { /* unknown */ }
+  const merged = rec ? {
+    ...rec,
+    turns: [...(rec.turns || []), ...((fb && fb.turns) || []), ...((longRec && longRec.turns) || [])],
+    clearTest: fb && fb.clearTest, bridge, keyClears, leftInBox,
+  } : null;
   if (merged) {
     try { bundle.stages.analysis = analyseConversation(merged, tools, { expect: { 'code-body': CODE_BODY } }); } catch (e) { bundle.stages.analysis = { error: e.message }; }
   }
